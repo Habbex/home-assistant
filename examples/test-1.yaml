@@ -1,0 +1,330 @@
+esphome:
+  name: waveshare-p4-touch-lcd-4c
+  friendly_name: WaveShare P4 Touch LCD 4
+  name_add_mac_suffix: false
+
+esp32:
+  board: esp32-p4-evboard
+  flash_size: 32Mb
+  cpu_frequency: 400MHz
+  framework:
+    type: esp-idf
+    # platform_version: https://github.com/pioarduino/platform-espressif32/releases/download/54.03.21/platform-espressif32.zip
+    version: 5.4.2
+    platform_version: 54.03.21
+    advanced:
+      enable_idf_experimental_features: yes
+
+# Enable logging
+logger:
+  level: debug
+  logs:
+    lvgl: info
+  hardware_uart: UART0
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret waveshare_api
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Esp32-P4-Touch-Lcd-4C"
+    password: !secret ap_pwd
+
+psram:
+  speed: 200MHz
+
+esp32_hosted:
+  active_high: true
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+
+i2c:
+  sda: GPIO7
+  scl: GPIO8
+  scan: true
+  frequency: 400kHz
+  id: i2c_bus
+
+i2s_audio:
+  - id: audio_bus
+    i2s_mclk_pin: GPIO13
+    i2s_lrclk_pin: GPIO10
+    i2s_bclk_pin: GPIO12
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    i2c_id: i2c_bus
+    address: 0x18
+
+microphone:
+  - platform: i2s_audio
+    id: esp32_microphone
+    i2s_audio_id: audio_bus
+    i2s_din_pin: GPIO11
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    adc_type: external
+
+speaker:
+  - platform: i2s_audio
+    id: esp32_speaker
+    i2s_audio_id: audio_bus
+    i2s_dout_pin: GPIO9
+    audio_dac: es8311_dac
+    dac_type: external
+    channel: mono
+    buffer_duration: 100ms
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+  - platform: mixer
+    id: mixing_speaker
+    output_speaker: esp32_speaker
+    source_speakers:
+      - id: announcement_mixing_input
+        timeout: never
+      - id: media_mixing_input
+        timeout: never
+
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+
+switch:
+  - platform: gpio
+    pin: GPIO53  # BSP_POWER_AMP_IO
+    name: "Audio Amplifier"
+    id: audio_amplifier
+    restore_mode: ALWAYS_OFF
+
+media_player:
+  - platform: speaker
+    name: "ESP32 P4 Media Player"
+    id: speaker_media_player
+    codec_support_enabled: true
+    volume_min: 0.5
+    volume_max: 0.75
+    volume_increment: 0.05
+    announcement_pipeline:
+      speaker: announcement_resampling_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1
+    media_pipeline:
+      speaker: media_resampling_speaker
+      format: FLAC
+      num_channels: 1
+      sample_rate: 48000
+    on_announcement:
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - micro_wake_word.stop
+            - voice_assistant.stop
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0.0s
+      - switch.turn_on: audio_amplifier
+      - delay: 100ms
+    on_state:
+      if:
+        condition:
+          and:
+            - not:
+                voice_assistant.is_running:
+            - not:
+                media_player.is_announcing:
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+    on_play:
+      - logger.log: "Media player started playing, disabling microphone"
+      - switch.turn_on: audio_amplifier
+      - delay: 100ms
+      - micro_wake_word.stop
+      - voice_assistant.stop
+    on_idle:
+      - delay: 100ms
+      - switch.turn_off: audio_amplifier
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - micro_wake_word.start
+
+
+sensor:
+  - platform: template
+    name: "Voice Assistant State"
+    lambda: |-
+      if (id(esp32_microphone).is_running()) {
+        return 1;
+      } else {
+        return 0;
+      }
+    update_interval: 2s
+
+text_sensor:
+  - platform: template
+    name: "Voice Assistant Status"
+    id: voice_status
+    update_interval: 5s
+    lambda: |-
+      if (id(esp32_microphone).is_running()) {
+        return {"Listening"};
+      } else {
+        return {"Idle"};
+      }
+
+micro_wake_word:
+  id: my_wake_word
+  models:
+    - model: hey_jarvis
+  on_wake_word_detected:
+    then:
+      - logger.log: "Wake word detected"
+      - voice_assistant.start:
+          wake_word: !lambda return wake_word;
+
+## Voice Assistant
+voice_assistant:
+  microphone: esp32_microphone
+  media_player: speaker_media_player
+  micro_wake_word: my_wake_word
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+  conversation_timeout: 300s
+  on_end:
+    # Wait a short amount of time to see if an announcement starts
+    - wait_until:
+        condition:
+          - media_player.is_announcing:
+        timeout: 0.5s
+    # Announcement is finished and the I2S bus is free
+    - wait_until:
+        - and:
+            - not:
+                media_player.is_announcing:
+            - not:
+                media_player.is_playing:
+    - micro_wake_word.start:
+  on_client_connected:
+    - micro_wake_word.start:
+  on_client_disconnected:
+    - micro_wake_word.stop:
+
+## TOUCHSCREEN CONFIG
+touchscreen:
+  - platform: gt911
+    id: touchscreen_
+    # address: 0x14
+    on_touch:
+      - logger.log:
+          format: "Touch at %d/%d"
+          args: [touch.x, touch.y]
+
+## PANEL BACKLIGHT CONFIG
+output:
+  - platform: ledc
+    id: backlight_
+    pin: GPIO26
+    frequency: 100Hz
+    inverted: true
+    min_power: 0.1 # To prevent the backlight from being too dim
+    max_power: 1.0 # 0.8 To prevent overheating due to excessive lighting
+    
+light:
+  - platform: monochromatic
+    name: "backlight"
+    output: backlight_
+    id: backlight_light
+    restore_mode: ALWAYS_ON
+
+## MIPI DSI CONFIG
+esp_ldo:
+  - channel: 3
+    voltage: 2.5V
+
+display:
+  - platform: mipi_dsi
+    model: WAVESHARE-P4-NANO-10.1
+
+    # DPI config
+    lanes: 2
+    lane_bit_rate: 1500000000
+    hsync_pulse_width: 20
+    hsync_front_porch: 40
+    hsync_back_porch: 20
+    vsync_pulse_width: 4
+    vsync_front_porch: 24
+    vsync_back_porch: 12
+    pclk_frequency: 80MHz
+    dimensions:
+      height: 720
+      width: 720
+
+    # Vendor config
+    init_sequence:
+    - [0xE0, 0x00]
+    - [0xE1, 0x93, 0xE2, 0x65, 0xE3, 0xF8, 0x80, 0x01]
+    - [0xE0, 0x01]
+    - [0x00, 0x00, 0x01, 0x41, 0x03, 0x10, 0x04, 0x44]
+    - [0x17, 0x00, 0x18, 0xD0, 0x19, 0x00, 0x1A, 0x00, 0x1B, 0xD0, 0x1C, 0x00]
+    - [0x24, 0xFE, 0x35, 0x26]
+    - [0x37, 0x09]
+    - [0x38, 0x04, 0x39, 0x08, 0x3A, 0x0A, 0x3C, 0x78, 0x3D, 0xFF, 0x3E, 0xFF, 0x3F, 0xFF]
+    - [0x40, 0x04, 0x41, 0x64, 0x42, 0xC7, 0x43, 0x18, 0x44, 0x0B, 0x45, 0x14]
+    - [0x55, 0x02, 0x57, 0x49, 0x59, 0x0A, 0x5A, 0x1B, 0x5B, 0x19]
+    - [0x5D, 0x7F, 0x5E, 0x56, 0x5F, 0x43, 0x60, 0x37, 0x61, 0x33, 0x62, 0x25, 0x63, 0x2A, 0x64, 0x16, 0x65, 0x30, 0x66, 0x2F, 0x67, 0x32, 0x68, 0x53, 0x69, 0x43, 0x6A, 0x4C, 0x6B, 0x40, 0x6C, 0x3D, 0x6D, 0x31, 0x6E, 0x20, 0x6F, 0x0F]
+    - [0x70, 0x7F, 0x71, 0x56, 0x72, 0x43, 0x73, 0x37, 0x74, 0x33, 0x75, 0x25, 0x76, 0x2A, 0x77, 0x16, 0x78, 0x30, 0x79, 0x2F, 0x7A, 0x32, 0x7B, 0x53, 0x7C, 0x43, 0x7D, 0x4C, 0x7E, 0x40, 0x7F, 0x3D, 0x80, 0x31, 0x81, 0x20, 0x82, 0x0F]
+    - [0xE0, 0x02, 0x00, 0x5F, 0x01, 0x5F, 0x02, 0x5E, 0x03, 0x5E, 0x04, 0x50, 0x05, 0x48, 0x06, 0x48, 0x07, 0x4A, 0x08, 0x4A, 0x09, 0x44, 0x0A, 0x44, 0x0B, 0x46, 0x0C, 0x46, 0x0D, 0x5F, 0x0E, 0x5F, 0x0F, 0x57, 0x10, 0x57, 0x11, 0x77, 0x12, 0x77, 0x13, 0x40, 0x14, 0x42, 0x15, 0x5F]
+    - [0x16, 0x5F, 0x17, 0x5F, 0x18, 0x5E, 0x19, 0x5E, 0x1A, 0x50, 0x1B, 0x49, 0x1C, 0x49, 0x1D, 0x4B, 0x1E, 0x4B, 0x1F, 0x45, 0x20, 0x45, 0x21, 0x47, 0x22, 0x47, 0x23, 0x5F, 0x24, 0x5F, 0x25, 0x57, 0x26, 0x57, 0x27, 0x77, 0x28, 0x77, 0x29, 0x41, 0x2A, 0x43, 0x2B, 0x5F]
+    - [0x2C, 0x1E, 0x2D, 0x1E, 0x2E, 0x1F, 0x2F, 0x1F, 0x30, 0x10, 0x31, 0x07, 0x32, 0x07, 0x33, 0x05, 0x34, 0x05, 0x35, 0x0B, 0x36, 0x0B, 0x37, 0x09, 0x38, 0x09, 0x39, 0x1F, 0x3A, 0x1F, 0x3B, 0x17, 0x3C, 0x17, 0x3D, 0x17, 0x3E, 0x17, 0x3F, 0x03, 0x40, 0x01, 0x41, 0x1F]
+    - [0x42, 0x1E, 0x43, 0x1E, 0x44, 0x1F, 0x45, 0x1F, 0x46, 0x10, 0x47, 0x06, 0x48, 0x06, 0x49, 0x04, 0x4A, 0x04, 0x4B, 0x0A, 0x4C, 0x0A, 0x4D, 0x08, 0x4E, 0x08, 0x4F, 0x1F, 0x50, 0x1F, 0x51, 0x17, 0x52, 0x17, 0x53, 0x17, 0x54, 0x17, 0x55, 0x02, 0x56, 0x00, 0x57, 0x1F]
+    - [0xE0, 0x02, 0x58, 0x40, 0x59, 0x00, 0x5A, 0x00, 0x5B, 0x30, 0x5C, 0x01, 0x5D, 0x30, 0x5E, 0x01, 0x5F, 0x02, 0x60, 0x30, 0x61, 0x03, 0x62, 0x04, 0x63, 0x04, 0x64, 0xA6, 0x65, 0x43, 0x66, 0x30, 0x67, 0x73, 0x68, 0x05, 0x69, 0x04, 0x6A, 0x7F, 0x6B, 0x08, 0x6C, 0x00, 0x6D, 0x04, 0x6E, 0x04, 0x6F, 0x88]
+    - [0x75, 0xD9, 0x76, 0x00, 0x77, 0x33, 0x78, 0x43]
+    - [0xE0, 0x00, 0x11, 0x00]
+    - delay 120ms
+    - [0x29, 0x00]
+    - delay 120ms
+    - [0x35, 0x00]
+    
+    # Panel config
+    color_order: rgb
+    pixel_mode: 24bit
+    color_depth: 24
+    byte_order: little_endian
+    reset_pin: GPIO27
+
+    show_test_card: true
