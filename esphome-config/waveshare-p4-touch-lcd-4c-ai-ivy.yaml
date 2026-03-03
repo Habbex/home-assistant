@@ -181,6 +181,10 @@ speaker:
       - id: media_speaker_mix
         timeout: 100ms
 
+  - platform: resampler
+    id: music_resampler
+    output_speaker: media_speaker_mix
+
 # Old
 # i2s_audio:
 #   id: i2s_bus
@@ -258,11 +262,12 @@ media_player:
     volume_max: 0.75
     volume_increment: 0.05
     buffer_size: 256000
+
     on_play:
       - logger.log: "Audio playing! Triggering replying animation."
       - lvgl.animimg.update:
           id: state_anim
-          src: [replying_01, replying_03] #,  replying_05, replying_07, replying_09, replying_11, replying_13]
+          src: [replying_01, replying_03,  replying_05, replying_07, replying_09, replying_11, replying_13]
           duration: 2600ms
           repeat_count: forever
           auto_start: true
@@ -274,7 +279,7 @@ media_player:
           num_channels: 1
           
     media_pipeline:
-          speaker: media_speaker_mix 
+          speaker: music_resampler 
           format: WAV
           sample_rate: 16000
           num_channels: 1
@@ -305,18 +310,18 @@ micro_wake_word:
       # WAKE THE SCREEN AND RESET THE TIMER
       - light.turn_on: screen_backlight
       - script.execute: screen_idle_timer
-
+      - media_player.stop: board_player
+      - voice_assistant.stop
       - logger.log:
           format: "Wake word detected: %s"
           args: ["wake_word.c_str()"]
       - lvgl.animimg.update:
           id: state_anim
-          src: [listening_01,  listening_03]#,  listening_05,  listening_07,  listening_09,  listening_11,  listening_13]
+          src: [listening_01,  listening_03,  listening_05,  listening_07,  listening_09,  listening_11,  listening_13]
           duration: 2600ms
           repeat_count: forever
           auto_start: true
       - micro_wake_word.stop
-      - voice_assistant.stop
       - delay: 250ms
       - voice_assistant.start:
           wake_word: !lambda return wake_word;
@@ -339,7 +344,7 @@ voice_assistant:
     - micro_wake_word.stop
     - lvgl.animimg.update:
         id: state_anim
-        src: [idle_01,  idle_03] #,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
+        src: [idle_01,  idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
         duration: 2600ms
         repeat_count: forever
         auto_start: true
@@ -348,7 +353,7 @@ voice_assistant:
     - logger.log: "Mic is listening"
     - lvgl.animimg.update:
         id: state_anim
-        src: [listening_01,  listening_03]#,  listening_05,  listening_07,  listening_09,  listening_11,  listening_13]
+        src: [listening_01,  listening_03,  listening_05,  listening_07,  listening_09,  listening_11,  listening_13]
         duration: 2600ms
         repeat_count: forever
         auto_start: true
@@ -361,7 +366,7 @@ voice_assistant:
 
     - lvgl.animimg.update:
           id: state_anim
-          src: [processing_01,  processing_03]#,  processing_05,  processing_07,  processing_09,  processing_11, processing_13]
+          src: [processing_01,  processing_03,  processing_05,  processing_07,  processing_09,  processing_11, processing_13]
           duration: 2600ms
           repeat_count: forever
           auto_start: true
@@ -373,7 +378,7 @@ voice_assistant:
     - micro_wake_word.stop
     - lvgl.animimg.update:
         id: state_anim
-        src: [replying_01,  replying_03]#,  replying_05, replying_07, replying_09,  replying_11,  replying_13]
+        src: [replying_01,  replying_03,  replying_05, replying_07, replying_09,  replying_11,  replying_13]
         duration: 2600ms
         repeat_count: forever
         auto_start: true
@@ -382,7 +387,7 @@ voice_assistant:
     - script.execute: screen_idle_timer
     - lvgl.animimg.update:
         id: state_anim
-        src: [idle_01,  idle_03]#,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
+        src: [idle_01,  idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
         duration: 2600ms
         repeat_count: forever
         auto_start: true
@@ -395,7 +400,7 @@ voice_assistant:
         args: ["code", "message.c_str()"]
     - lvgl.animimg.update:
         id: state_anim
-        src: [idle_01,  idle_03]#,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
+        src: [idle_01,  idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
         duration: 2600ms
         repeat_count: forever
         auto_start: true
@@ -418,7 +423,7 @@ script:
             - micro_wake_word.start
             - lvgl.animimg.update:
                 id: state_anim
-                src: [idle_01,  idle_03]#,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
+                src: [idle_01,  idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
                 duration: 2600ms
                 repeat_count: forever
                 auto_start: true
@@ -447,7 +452,7 @@ script:
       # 2. Force Ivy back to her idle face
       - lvgl.animimg.update:
           id: state_anim
-          src: [idle_01, idle_03]#,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
+          src: [idle_01, idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
           duration: 2600ms
           repeat_count: forever
           auto_start: true
@@ -490,26 +495,26 @@ image:
     #   id: listening_02
     - file: "Ivy/Assets/listening/listening-3.png"
       id: listening_03
-    # # - file: "Ivy/Assets/listening/listening-4.png"
-    # #   id: listening_04
-    # - file: "Ivy/Assets/listening/listening-5.png"
-    #   id: listening_05
-    # # - file: "Ivy/Assets/listening/listening-6.png"
-    # #   id: listening_06
-    # - file: "Ivy/Assets/listening/listening-7.png"
-    #   id: listening_07
-    # # - file: "Ivy/Assets/listening/listening-8.png"
-    # #   id: listening_08
-    # - file: "Ivy/Assets/listening/listening-9.png"
-    #   id: listening_09
-    # # - file: "Ivy/Assets/listening/listening-10.png"
-    # #   id: listening_10
-    # - file: "Ivy/Assets/listening/listening-11.png"
-    #   id: listening_11
-    # # - file: "Ivy/Assets/listening/listening-12.png"
-    # #   id: listening_12
-    # - file: "Ivy/Assets/listening/listening-13.png"
-    #   id: listening_13
+    # - file: "Ivy/Assets/listening/listening-4.png"
+    #   id: listening_04
+    - file: "Ivy/Assets/listening/listening-5.png"
+      id: listening_05
+    # - file: "Ivy/Assets/listening/listening-6.png"
+    #   id: listening_06
+    - file: "Ivy/Assets/listening/listening-7.png"
+      id: listening_07
+    # - file: "Ivy/Assets/listening/listening-8.png"
+    #   id: listening_08
+    - file: "Ivy/Assets/listening/listening-9.png"
+      id: listening_09
+    # - file: "Ivy/Assets/listening/listening-10.png"
+    #   id: listening_10
+    - file: "Ivy/Assets/listening/listening-11.png"
+      id: listening_11
+    # - file: "Ivy/Assets/listening/listening-12.png"
+    #   id: listening_12
+    - file: "Ivy/Assets/listening/listening-13.png"
+      id: listening_13
 
     #replying
     - file: "Ivy/Assets/replying/replying-1.png"
@@ -518,26 +523,26 @@ image:
     #   id: replying_02
     - file: "Ivy/Assets/replying/replying-3.png"
       id: replying_03
-    # # - file: "Ivy/Assets/replying/replying-4.png"
-    # #   id: replying_04
-    # - file: "Ivy/Assets/replying/replying-5.png"
-    #   id: replying_05
-    # # - file: "Ivy/Assets/replying/replying-6.png"
-    # #   id: replying_06
-    # - file: "Ivy/Assets/replying/replying-7.png"
-    #   id: replying_07
-    # # - file: "Ivy/Assets/replying/replying-8.png"
-    # #   id: replying_08
-    # - file: "Ivy/Assets/replying/replying-9.png"
-    #   id: replying_09
-    # # - file: "Ivy/Assets/replying/replying-10.png"
-    # #   id: replying_10
-    # - file: "Ivy/Assets/replying/replying-11.png"
-    #   id: replying_11
-    # # - file: "Ivy/Assets/replying/replying-12.png"
-    # #   id: replying_12
-    # - file: "Ivy/Assets/replying/replying-13.png"
-    #   id: replying_13
+    # - file: "Ivy/Assets/replying/replying-4.png"
+    #   id: replying_04
+    - file: "Ivy/Assets/replying/replying-5.png"
+      id: replying_05
+    # - file: "Ivy/Assets/replying/replying-6.png"
+    #   id: replying_06
+    - file: "Ivy/Assets/replying/replying-7.png"
+      id: replying_07
+    # - file: "Ivy/Assets/replying/replying-8.png"
+    #   id: replying_08
+    - file: "Ivy/Assets/replying/replying-9.png"
+      id: replying_09
+    # - file: "Ivy/Assets/replying/replying-10.png"
+    #   id: replying_10
+    - file: "Ivy/Assets/replying/replying-11.png"
+      id: replying_11
+    # - file: "Ivy/Assets/replying/replying-12.png"
+    #   id: replying_12
+    - file: "Ivy/Assets/replying/replying-13.png"
+      id: replying_13
 
     #thinking/processing   
     - file: "Ivy/Assets/processing/processing-1.png"
@@ -546,26 +551,26 @@ image:
     #   id: processing_02
     - file: "Ivy/Assets/processing/processing-3.png"
       id: processing_03
-    # # - file: "Ivy/Assets/processing/processing-4.png"
-    # #   id: processing_04
-    # - file: "Ivy/Assets/processing/processing-5.png"
-    #   id: processing_05
-    # # - file: "Ivy/Assets/processing/processing-6.png"
-    # #   id: processing_06
-    # - file: "Ivy/Assets/processing/processing-7.png"
-    #   id: processing_07
-    # # - file: "Ivy/Assets/processing/processing-8.png"
-    # #   id: processing_08
-    # - file: "Ivy/Assets/processing/processing-9.png"
-    #   id: processing_09
-    # # - file: "Ivy/Assets/processing/processing-10.png"
-    # #   id: processing_10
-    # - file: "Ivy/Assets/processing/processing-11.png"
-    #   id: processing_11
-    # # - file: "Ivy/Assets/processing/processing-12.png"
-    # #   id: processing_12
-    # - file: "Ivy/Assets/processing/processing-13.png"
-    #   id: processing_13
+    # - file: "Ivy/Assets/processing/processing-4.png"
+    #   id: processing_04
+    - file: "Ivy/Assets/processing/processing-5.png"
+      id: processing_05
+    # - file: "Ivy/Assets/processing/processing-6.png"
+    #   id: processing_06
+    - file: "Ivy/Assets/processing/processing-7.png"
+      id: processing_07
+    # - file: "Ivy/Assets/processing/processing-8.png"
+    #   id: processing_08
+    - file: "Ivy/Assets/processing/processing-9.png"
+      id: processing_09
+    # - file: "Ivy/Assets/processing/processing-10.png"
+    #   id: processing_10
+    - file: "Ivy/Assets/processing/processing-11.png"
+      id: processing_11
+    # - file: "Ivy/Assets/processing/processing-12.png"
+    #   id: processing_12
+    - file: "Ivy/Assets/processing/processing-13.png"
+      id: processing_13
 
     #idle
     - file: "Ivy/Assets/idle/idle-1.png"
@@ -574,26 +579,26 @@ image:
     #   id: idle_02
     - file: "Ivy/Assets/idle/idle-3.png"
       id: idle_03
-    # # - file: "Ivy/Assets/idle/idle-4.png"
-    # #   id: idle_04
-    # - file: "Ivy/Assets/idle/idle-5.png"
-    #   id: idle_05
-    # # - file: "Ivy/Assets/idle/idle-6.png"
-    # #   id: idle_06
-    # - file: "Ivy/Assets/idle/idle-7.png"
-    #   id: idle_07
-    # # - file: "Ivy/Assets/idle/idle-8.png"
-    # #   id: idle_08
-    # - file: "Ivy/Assets/idle/idle-9.png"
-    #   id: idle_09
-    # # - file: "Ivy/Assets/idle/idle-10.png"
-    # #   id: idle_10
-    # - file: "Ivy/Assets/idle/idle-11.png"
-    #   id: idle_11
-    # # - file: "Ivy/Assets/idle/idle-12.png"
-    # #   id: idle_12
-    # - file: "Ivy/Assets/idle/idle-13.png"
-    #   id: idle_13
+    # - file: "Ivy/Assets/idle/idle-4.png"
+    #   id: idle_04
+    - file: "Ivy/Assets/idle/idle-5.png"
+      id: idle_05
+    # - file: "Ivy/Assets/idle/idle-6.png"
+    #   id: idle_06
+    - file: "Ivy/Assets/idle/idle-7.png"
+      id: idle_07
+    # - file: "Ivy/Assets/idle/idle-8.png"
+    #   id: idle_08
+    - file: "Ivy/Assets/idle/idle-9.png"
+      id: idle_09
+    # - file: "Ivy/Assets/idle/idle-10.png"
+    #   id: idle_10
+    - file: "Ivy/Assets/idle/idle-11.png"
+      id: idle_11
+    # - file: "Ivy/Assets/idle/idle-12.png"
+    #   id: idle_12
+    - file: "Ivy/Assets/idle/idle-13.png"
+      id: idle_13
 
 # REQUIRED for LVGL text in ESPHome
 font:
@@ -625,7 +630,7 @@ lvgl:
               x: 0
               y: 0
               align: CENTER
-              src: [idle_01, idle_03]#,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
+              src: [idle_01, idle_03, idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
               duration: 2600ms
               repeat_count: forever
               auto_start: true
