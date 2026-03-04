@@ -3,28 +3,52 @@ esphome:
   friendly_name: WaveShare P4 Touch LCD 4 AI 
   name_add_mac_suffix: false
   on_boot:
-      priority: -100 # This ensures it runs last, after HA is fully connected
-      then:
-        # 1. Show the final success text
-        - lvgl.label.update:
-            id: boot_label
-            text: "System Ready!"
-        
-        # 2. Wait 1 second so you can actually read the success message
-        - delay: 1s 
-        
-        # 3. Hide the boot screen
-        - lvgl.widget.update:
-            id: boot_screen
-            hidden: true
-            
-        # 4. Reveal the idle animation
-        - lvgl.widget.update:
-            id: main_screen
-            hidden: false
-            
-        # 5. Start the idle timeout timer
-        - script.execute: screen_idle_timer
+    priority: -100 
+    then:
+      - lvgl.label.update:
+          id: boot_label
+          text: "Hardware Initialized..."
+      - delay: 1s
+
+      # Wait for WiFi (milestone 1)
+      - wait_until:
+          wifi.connected:
+      - lvgl.label.update:
+          id: boot_label
+          text: "WiFi: Connected"
+      - delay: 800ms
+
+      # Wait for Home Assistant (milestone 2)
+      - wait_until:
+          api.connected:
+      - lvgl.label.update:
+          id: boot_label
+          text: "Home Assistant: Linked"
+      - delay: 800ms
+
+      # THE JUMPSTART FIX: 
+      # We force the engine to Cycle ONCE to clear the I2S/SDIO buffers
+      - lvgl.label.update:
+          id: boot_label
+          text: "Starting Duplex Audio..."
+      - micro_wake_word.stop
+      - delay: 500ms
+      - micro_wake_word.start
+      
+      # Now we wait for the system to settle into the detecting state
+      - lvgl.label.update:
+          id: boot_label
+          text: "AEC & Wake Word: OK"
+      - delay: 1.5s 
+
+      # FINISH: Hide boot, reveal Ivy
+      - lvgl.widget.update:
+          id: boot_screen
+          hidden: true
+      - lvgl.widget.update:
+          id: main_screen
+          hidden: false
+      - script.execute: screen_idle_timer
     
 
 esp32:
@@ -137,8 +161,8 @@ audio_adc:
 esp_aec:
   id: aec_processor
   sample_rate: 16000
-  mode: voip_low_cost
-  filter_length: 4
+  mode: voip_high_perf
+  filter_length: 8
 
 i2s_audio_duplex:
   id: i2s_duplex
@@ -152,7 +176,7 @@ i2s_audio_duplex:
   output_sample_rate: 16000    
   aec_id: aec_processor
   use_stereo_aec_reference: true
-  aec_reference_delay_ms: 80
+  aec_reference_delay_ms: 120
 
 microphone:
   - platform: i2s_audio_duplex
@@ -177,9 +201,9 @@ speaker:
     num_channels: 1
     source_speakers:
       - id: va_speaker_mix
-        timeout: 100ms
+        timeout: 50ms
       - id: media_speaker_mix
-        timeout: 100ms
+        timeout: 50ms
 
   - platform: resampler
     id: music_resampler
@@ -271,7 +295,7 @@ media_player:
           duration: 2600ms
           repeat_count: forever
           auto_start: true
-    
+  
     announcement_pipeline:
           speaker: va_speaker_mix
           format: WAV
@@ -286,7 +310,7 @@ media_player:
 
     on_idle:
       - logger.log: "Media player idle (playback finished)"
-      - script.execute: restart_wakeword_safely
+      # - script.execute: restart_wakeword_safelymusic_resampler
 
 
 # ---- Voice Assistant (uses mic + media_player for replies) ----
@@ -294,7 +318,7 @@ micro_wake_word:
   id: my_wake_word
   microphone:
     microphone: mic_raw
-    gain_factor: 10
+    gain_factor: 2
   stop_after_detection: true
   models:
     - model: hey_jarvis
@@ -310,8 +334,10 @@ micro_wake_word:
       # WAKE THE SCREEN AND RESET THE TIMER
       - light.turn_on: screen_backlight
       - script.execute: screen_idle_timer
+
       - media_player.stop: board_player
       - voice_assistant.stop
+
       - logger.log:
           format: "Wake word detected: %s"
           args: ["wake_word.c_str()"]
@@ -322,7 +348,7 @@ micro_wake_word:
           repeat_count: forever
           auto_start: true
       - micro_wake_word.stop
-      - delay: 250ms
+      - delay: 300ms
       - voice_assistant.start:
           wake_word: !lambda return wake_word;
 
@@ -337,6 +363,22 @@ voice_assistant:
 
   on_client_connected:
     - logger.log: "Voice Assistant connected to Home Assistant"
+    - lvgl.label.update:
+            id: boot_label
+            text: "Home Assistant Linked"
+    - delay: 1s
+    - lvgl.label.update:
+        id: boot_label
+        text: "Voice Assistant: Ready"
+    - delay: 1s
+    #Clear the boot screen once everything is confirmed
+    - lvgl.widget.update:
+        id: boot_screen
+        hidden: true
+    - lvgl.widget.update:
+        id: main_screen
+        hidden: false
+    - script.execute: screen_idle_timer
     - script.execute: restart_wakeword_safely
 
   on_client_disconnected:
@@ -392,7 +434,7 @@ voice_assistant:
         repeat_count: forever
         auto_start: true
     - delay: 250ms
-    - script.execute: restart_wakeword_safely
+    # - script.execute: restart_wakeword_safelymusic_resampler
 
   on_error:
     - logger.log:
@@ -405,7 +447,7 @@ voice_assistant:
         repeat_count: forever
         auto_start: true
     - delay: 250ms
-    - script.execute: restart_wakeword_safely
+    # - script.execute: restart_wakeword_safelymusic_resampler
 
 script:
   - id: restart_wakeword_safely
@@ -430,7 +472,7 @@ script:
           else:
             - logger.log: "Wake word start delayed; media player not idle"
             - delay: 500ms
-            - script.execute: restart_wakeword_safely
+            # - script.execute: restart_wakeword_safelymusic_resampler
   - id: screen_idle_timer
     mode: restart
     then:
@@ -458,7 +500,7 @@ script:
           auto_start: true
           
       # 3. Safely reboot the microphone
-      - script.execute: restart_wakeword_safely
+      # - script.execute: restart_wakeword_safelymusic_resampler
 
 display:
   - platform: mipi_dsi
