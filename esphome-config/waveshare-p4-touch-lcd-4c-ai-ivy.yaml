@@ -189,7 +189,7 @@ esp_aec:
   id: aec_processor
   sample_rate: 16000
   mode: voip_high_perf
-  filter_length: 4
+  filter_length: 2
 
 i2s_audio_duplex:
   id: i2s_duplex
@@ -205,6 +205,7 @@ i2s_audio_duplex:
   # 100 ms matches the original aec_reference_buffer_ms value.
   aec_reference: ring_buffer
   aec_reference_buffer_ms: 100
+  aec_ref_ring_in_psram: true
   # ESP32-P4 is RISC-V; the default dsps_fird_s16 SIMD decimator is
   # unreliable on this core (esp-dsp issues #117/#102). Use the scalar
   # float path instead.
@@ -355,7 +356,7 @@ media_player:
     volume_min: 0.2
     volume_max: 0.8
     volume_increment: 0.05
-    buffer_size: 32768
+    buffer_size: 131072
     task_stack_in_psram: true
 
     # on_play fires for BOTH music and TTS announcements. The va_speaking guard
@@ -389,9 +390,9 @@ media_player:
 
     media_pipeline:
           speaker: music_resampler
-          format: MP3
-          sample_rate: 44100
-          num_channels: 2
+          format: FLAC
+          sample_rate: 16000
+          num_channels: 1
 
     on_idle:
       # Return to the clock/weather screen immediately so a wake word
