@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:esphome.io)",
+      "Bash(docker compose *)",
+      "Bash(docker --version)",
+      "Read(//tmp/**)",
+      "Bash(python3 -c ' *)",
+      "WebFetch(domain:www.home-assistant.io)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}

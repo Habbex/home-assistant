@@ -16,7 +16,7 @@ esphome:
         - lvgl.label.update:
             id: boot_label
             text: "WiFi: Connected"
-        - delay: 800ms
+        - delay: 400ms
 
         # Wait for Home Assistant (milestone 2)
         - wait_until:
@@ -24,7 +24,7 @@ esphome:
         - lvgl.label.update:
             id: boot_label
             text: "Home Assistant: Linked"
-        - delay: 800ms
+        - delay: 400ms
 
         # THE JUMPSTART FIX:
         # Force the engine to cycle ONCE to clear the I2S/SDIO buffers
@@ -42,41 +42,78 @@ esphome:
         - lvgl.label.update:
             id: boot_label
             text: "AEC & Wake Word: OK"
-        - delay: 1.5s
+        - delay: 800ms
 
-        # FINISH: Hide boot, reveal Ivy, then start the idle timer
+        # FINISH: Hide boot, reveal main screen, populate clock, start idle timer
         - lvgl.widget.update:
             id: boot_screen
             hidden: true
         - lvgl.widget.update:
             id: main_screen
             hidden: false
-        # Only start the idle timer AFTER the screen is visible
+        - script.execute: update_clock_display
+        - script.execute: refresh_weather_display
         - script.execute: screen_idle_timer
-
 
 esp32:
   board: esp32-p4
-  flash_size: 32Mb
+  flash_size: 32MB
   framework:
     type: esp-idf
     advanced:
       enable_idf_experimental_features: yes
     sdkconfig_options:
           CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT: y
+          # ╔══════════════════════════════════════════════════════════════╗
+          # ║  DO NOT change SDIO RX mode to RX_NONE or RX_MAX_SIZE.      ║
+          # ║  The C6 slave firmware is compiled with streaming mode ON.   ║
+          # ║  It batches multiple Wi-Fi packets into one SDIO transfer    ║
+          # ║  (observed: 2869–7530 byte batches).                         ║
+          # ║  Per-packet modes cap at ESP_RX_BUFFER_SIZE = 1536 bytes     ║
+          # ║  (sdio_reg.h:41) and reject all larger batches with          ║
+          # ║  "Len from slave[N] exceeds max [1536]" → TCP abort →        ║
+          # ║  TTS download fails → pipeline error → device broken.        ║
+          # ║  STREAMING_MODE (the default) is the only compatible mode.   ║
+          # ╚══════════════════════════════════════════════════════════════╝
 
 logger:
   level: INFO
   hardware_uart: UART0
+  # Tag names below are the actual ones in ESPHome 2026.4.x source
+  # (media_player.cpp, speaker_media_player.cpp, etc.). NOTE: lines like
+  # `[S][media_player]: 'X' >> IDLE` come from aioesphomeapi's client-side
+  # state_log_formatter.py — they are NOT device logs and CANNOT be
+  # suppressed here. Use `esphome logs --no-states` to hide them.
+  logs:
+    media_player: WARN
+    speaker_media_player: WARN
+    speaker_media_player.pipeline: WARN
+    audio: WARN
+    audio_reader: WARN
+    audio.decoder: WARN
+    speaker_mixer: WARN
+    resampler_speaker: WARN
+    speaker: WARN
+    i2s_audio: WARN
+    i2s_audio.speaker: WARN
+    i2s_audio.microphone: WARN
+    i2s_duplex: WARN
+    i2s_duplex.spk: WARN
+    i2s_duplex.mic: WARN
+    audio_dac: WARN
+    audio_adc: WARN
+    esp_aec: WARN
+    number: WARN
+    homeassistant.text_sensor: WARN
+    light: WARN
+    sensor: WARN
 
 # Enable Home Assistant API
+# NOTE: on_client_connected label update removed — redundant with the
+# wait_until: api.connected step in on_boot.
 api:
   encryption:
     key: !secret waveshare_api
-  on_client_connected:
-      - lvgl.label.update:
-          id: boot_label
-          text: "Home Assistant Linked..."
 
 wifi:
   ssid: !secret wifi_ssid
@@ -127,7 +164,7 @@ switch:
 
 external_components:
   - source: github://n-IA-hane/intercom-api
-    components: [i2s_audio_duplex, esp_aec]
+    components: [i2s_audio_duplex, esp_aec, audio_processor]
 
 audio_dac:
   - platform: es8311
@@ -163,9 +200,18 @@ i2s_audio_duplex:
   i2s_dout_pin: GPIO9
   sample_rate: 16000
   output_sample_rate: 16000
-  aec_id: aec_processor
   use_stereo_aec_reference: true
-  aec_reference_delay_ms: 200
+  # ring_buffer mode gives better AEC delay alignment than previous_frame.
+  # 100 ms matches the original aec_reference_buffer_ms value.
+  aec_reference: ring_buffer
+  aec_reference_buffer_ms: 100
+  # ESP32-P4 is RISC-V; the default dsps_fird_s16 SIMD decimator is
+  # unreliable on this core (esp-dsp issues #117/#102). Use the scalar
+  # float path instead.
+  fir_decimator: custom
+  # Move non-DMA audio buffers to PSRAM (~15 KB internal RAM freed,
+  # reducing SDIO RX OOM pressure).
+  buffers_in_psram: true
 
 microphone:
   - platform: i2s_audio_duplex
@@ -187,6 +233,7 @@ speaker:
     id: audio_mixer
     output_speaker: hw_speaker
     num_channels: 1
+    task_stack_in_psram: true
     source_speakers:
       - id: va_speaker_mix
         timeout: 500ms
@@ -198,23 +245,71 @@ speaker:
     output_speaker: media_speaker_mix
     sample_rate: 16000
     num_channels: 1
+    task_stack_in_psram: true
 
 psram:
-  speed: 200MHz
+  speed: 100MHz
 
 esp_ldo:
   - channel: 3
     voltage: 2.5V
 
-# ---- Track metadata from Home Assistant ----
-# SpeakerMediaPlayer does not expose media_title/media_artist as public
-# members — pulling them from HA via text_sensor is the correct approach.
-#
-# IMPORTANT: check your HA entity ID matches. It is typically auto-generated
-# as: media_player.<friendly_device_name>_media_player (spaces→underscores,
-# all lowercase). For this device "WaveShare P4 Touch LCD 4 AI" + "Media Player"
-# → media_player.waveshare_p4_touch_lcd_4_ai_media_player
-# Verify in HA → Settings → Devices & Services → your ESPHome device.
+# ---- Clock ----
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time:
+      - seconds: 0
+        then:
+          - if:
+              condition:
+                lambda: 'return id(current_anim_state) == 0;'
+              then:
+                - script.execute: update_clock_display
+
+      # Every 5 minutes, wake the display briefly to show date/time/weather.
+      # Only fires when idle (state 0) — never interrupts VA or media playback.
+      - seconds: 0
+        minutes: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+        then:
+          - if:
+              condition:
+                lambda: 'return id(current_anim_state) == 0;'
+              then:
+                - light.turn_on: screen_backlight
+                - script.execute: update_clock_display
+                - script.execute: refresh_weather_display
+                - delay: 30s
+                - if:
+                    condition:
+                      lambda: 'return id(current_anim_state) == 0;'
+                    then:
+                      - light.turn_off: screen_backlight
+
+# ---- Weather temperature from Home Assistant ----
+# Verify your entity ID: HA → Settings → Devices & Services → weather integration
+sensor:
+  - platform: homeassistant
+    id: ha_temperature
+    entity_id: weather.forecast_home
+    attribute: temperature
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: weather_temp_label
+            text: !lambda |
+              if (std::isnan(x)) return std::string("-- °C");
+              char buf[16];
+              snprintf(buf, sizeof(buf), "%.0f °C", x);
+              return std::string(buf);
+
+# ---- Track metadata and weather condition from Home Assistant ----
+# Entity ID confirmed from HA device page: media_player.waveshare_p4_touch_lcd_4_ai
+# NOTE: No state guard here — we always update the label text regardless of
+# current screen state. The label widget is hidden when not in state 4 anyway,
+# so there is no visual side effect. The previous guard (current_anim_state == 4)
+# was the bug — the sensor fires BEFORE on_play switches to state 4, so the
+# label was never populated.
 text_sensor:
   - platform: homeassistant
     id: ha_media_title
@@ -222,30 +317,33 @@ text_sensor:
     attribute: media_title
     on_value:
       then:
-        - if:
-            condition:
-              lambda: 'return !id(va_speaking);'
-            then:
-              - lvgl.label.update:
-                  id: now_playing_title
-                  text: !lambda |
-                    return x.empty() ? std::string("Now Playing") : x;
-              - script.execute: update_now_playing
+        - lvgl.label.update:
+            id: now_playing_title
+            text: !lambda |
+              return x.empty() ? std::string("Unknown Track") : x;
 
   - platform: homeassistant
-    id: ha_media_artist
-    entity_id: media_player.waveshare_p4_touch_lcd_4_ai_media_player
-    attribute: media_artist
+    id: ha_weather_condition
+    entity_id: weather.forecast_home
     on_value:
       then:
-        - if:
-            condition:
-              lambda: 'return !id(va_speaking);'
-            then:
-              - lvgl.label.update:
-                  id: now_playing_artist
-                  text: !lambda |
-                    return x.empty() ? std::string(" ") : x;
+        - lvgl.label.update:
+            id: weather_icon_label
+            text: !lambda |
+              if (x == "sunny")            return std::string("\U000F0597");
+              if (x == "clear-night")      return std::string("\U000F0594");
+              if (x == "partlycloudy")     return std::string("\U000F0595");
+              if (x == "cloudy")           return std::string("\U000F0590");
+              if (x == "rainy")            return std::string("\U000F0596");
+              if (x == "pouring")          return std::string("\U000F0596");
+              if (x == "snowy")            return std::string("\U000F0598");
+              if (x == "snowy-rainy")      return std::string("\U000F067F");
+              if (x == "fog")              return std::string("\U000F0591");
+              if (x == "hail")             return std::string("\U000F0592");
+              if (x == "lightning")        return std::string("\U000F0593");
+              if (x == "lightning-rainy")  return std::string("\U000F067E");
+              if (x == "windy" || x == "windy-variant") return std::string("\U000F059D");
+              return std::string("\U000F0590");
 
 
 # ---- Media player ----
@@ -257,26 +355,35 @@ media_player:
     volume_min: 0.2
     volume_max: 0.8
     volume_increment: 0.05
-    buffer_size: 512000
+    buffer_size: 32768
+    task_stack_in_psram: true
 
+    # on_play fires for BOTH music and TTS announcements. The va_speaking guard
+    # skips the music path during TTS. Wake word is stopped here because
+    # mic_raw (pre-AEC) picks up speaker output; running wake word during music
+    # causes false triggers. The on_idle handler (below) re-enables it after
+    # music stops.
     on_play:
-      - logger.log: "Audio playing!"
       - if:
           condition:
             lambda: 'return !id(va_speaking);'
           then:
-            - script.execute: update_now_playing
-          else:
-            - logger.log: "on_play suppressed — VA is speaking"
-      - delay: 500ms
-      - script.execute: safe_wake_word_start
-      - media_player.volume_set:
-          id: board_player
-          volume: !lambda "return id(music_volume_slider).state;"
+            - script.stop: restart_wakeword_safely
+            - script.execute: safe_wake_word_stop
+            - if:
+                condition:
+                  lambda: 'return abs(id(board_player).volume - id(music_volume_slider).state) > 0.04;'
+                then:
+                  - media_player.volume_set:
+                      id: board_player
+                      volume: !lambda "return id(music_volume_slider).state;"
+            - script.execute:
+                id: set_anim_state
+                target_state: 4
 
     announcement_pipeline:
           speaker: va_speaker_mix
-          format: FLAC
+          format: WAV
           sample_rate: 16000
           num_channels: 1
 
@@ -287,15 +394,35 @@ media_player:
           num_channels: 2
 
     on_idle:
-      - logger.log: "Media player idle"
-      - media_player.volume_set:
-          id: board_player
-          volume: !lambda "return id(va_volume_slider).state;"
-      - delay: 4s
+      # Return to the clock/weather screen immediately so a wake word
+      # during the settle window doesn't find us stuck in state 4.
+      - if:
+          condition:
+            lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
+          then:
+            - media_player.volume_set:
+                id: board_player
+                volume: !lambda "return id(va_volume_slider).state;"
+      - if:
+          condition:
+            lambda: 'return !id(va_speaking);'
+          then:
+            - script.execute:
+                id: set_anim_state
+                target_state: 0
+      - delay: 1s
       - script.execute: restart_wakeword_safely
 
 
 # ---- Wake Word ----
+# Two models in parallel (hey_jarvis + hey_mycroft) — different phoneme
+# patterns give two chances to catch the wake word, helpful with a non-native
+# accent. mic_raw (pre-AEC) is correct here: the wake word model was trained
+# on raw mic audio; AEC post-processing distorts the phoneme characteristics
+# and reduces detection accuracy. mic_aec is only for the voice_assistant STT.
+# sliding_window_size: 4 — faster detection, less perceived lag.
+# probability_cutoff: 0.38 — sensitive at room distance; if music/TV causes
+# false triggers, raise toward 0.50.
 micro_wake_word:
   id: my_wake_word
   microphone:
@@ -304,12 +431,12 @@ micro_wake_word:
   stop_after_detection: false
   models:
     - model: hey_jarvis
-      probability_cutoff: 0.45
-      sliding_window_size: 6
+      probability_cutoff: 0.38
+      sliding_window_size: 4
   vad:
     model: github://esphome/micro-wake-word-models/models/v2/vad.json
-    probability_cutoff: 0.50
-    sliding_window_size: 6
+    probability_cutoff: 0.40
+    sliding_window_size: 4
 
   on_wake_word_detected:
     then:
@@ -323,12 +450,8 @@ micro_wake_word:
             media_player.is_playing:
               id: board_player
           then:
-            - media_player.stop: board_player
-            # SDIO CRASH FIX: 1200ms lets the SDIO DMA buffer pool fully drain
-            # before switching direction (RX stream → TX STT audio).
-            # Both crashes (sdio_rx_get_buffer:896 and transport_drv_sta_tx:290)
-            # were null buffer pointer asserts caused by switching too fast.
-            - delay: 1200ms
+            - media_player.pause: board_player
+            - delay: 600ms
       - voice_assistant.stop
       - logger.log:
           format: "Wake word detected: %s"
@@ -337,7 +460,7 @@ micro_wake_word:
           id: set_anim_state
           target_state: 1
       - script.execute: safe_wake_word_stop
-      - delay: 200ms
+      - delay: 100ms
       - voice_assistant.start:
           wake_word: !lambda return wake_word;
 
@@ -354,50 +477,63 @@ globals:
     restore_value: false
     initial_value: 'false'
 
-  # 0=idle  1=listening  2=processing  3=replying(TTS)  4=media playing
+  # 0=idle/clock  1=listening  2=processing  3=replying(TTS)  4=media playing
   - id: current_anim_state
     type: int
     restore_value: false
     initial_value: '0'
 
-  # True while VA is playing a TTS response
+  # True while VA TTS is playing — prevents on_play from switching
+  # to the Now Playing view during a spoken response
   - id: va_speaking
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  # True if STT actually heard speech this cycle. Used by on_end to
+  # decide whether to resume paused music: silence after wake word →
+  # resume; real command → stay paused (TTS reply or new media stream).
+  - id: stt_fired_this_cycle
     type: bool
     restore_value: false
     initial_value: 'false'
 
 
 # ---- Voice Assistant ----
+# noise_suppression_level: 4 (max) — WebRTC NS runs at full aggressiveness,
+# cutting background room noise and music spill before audio reaches HA STT.
+# volume_multiplier: 4.0 — additional software pre-amp on top of the 36dB
+# codec gain; gives the most pickup at room distance without distortion.
 voice_assistant:
   microphone:
     microphone: mic_aec
-    gain_factor: 8
+    gain_factor: 10
   media_player: board_player
-  noise_suppression_level: 0
+  noise_suppression_level: 4
   auto_gain: 31dBFS
-  volume_multiplier: 2.0
+  volume_multiplier: 4.0
 
   on_client_connected:
-    - logger.log: "Voice Assistant connected to Home Assistant"
     - script.execute: restart_wakeword_safely
 
   on_client_disconnected:
-    - logger.log: "Voice Assistant disconnected from Home Assistant"
     - script.execute: safe_wake_word_stop
     - script.execute:
         id: set_anim_state
         target_state: 0
 
-  on_wake_word_detected:
-    - logger.log: "VA wake word detected - pipeline stopping"
-
   on_listening:
-    - logger.log: "Mic is listening"
+    - globals.set:
+        id: stt_fired_this_cycle
+        value: 'false'
     - script.execute:
         id: set_anim_state
         target_state: 1
 
   on_stt_end:
+    - globals.set:
+        id: stt_fired_this_cycle
+        value: 'true'
     - script.execute: pipeline_watchdog
     - logger.log:
         format: "STT heard: %s"
@@ -411,9 +547,13 @@ voice_assistant:
     - globals.set:
         id: va_speaking
         value: 'true'
-    - media_player.volume_set:
-        id: board_player
-        volume: !lambda "return id(va_volume_slider).state;"
+    - if:
+        condition:
+          lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
+        then:
+          - media_player.volume_set:
+              id: board_player
+              volume: !lambda "return id(va_volume_slider).state;"
     - logger.log:
         format: "TTS text: %s"
         args: ["x.c_str()"]
@@ -426,14 +566,32 @@ voice_assistant:
     - globals.set:
         id: va_speaking
         value: 'false'
-    - media_player.volume_set:
-        id: board_player
-        volume: !lambda "return id(va_volume_slider).state;"
-    - script.execute:
-        id: set_anim_state
-        target_state: 0
-    # SDIO CRASH FIX: settle time before HA can push a new media stream
-    - delay: 800ms
+    - if:
+        condition:
+          lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
+        then:
+          - media_player.volume_set:
+              id: board_player
+              volume: !lambda "return id(va_volume_slider).state;"
+    # If music was playing when wake word fired AND user never spoke,
+    # resume music. Otherwise return to clock screen.
+    - if:
+        condition:
+          lambda: 'return id(was_playing_media) && !id(stt_fired_this_cycle);'
+        then:
+          - logger.log: "No command — resuming paused music"
+          - media_player.play: board_player
+          - script.execute:
+              id: set_anim_state
+              target_state: 4
+        else:
+          - script.execute:
+              id: set_anim_state
+              target_state: 0
+    - globals.set:
+        id: was_playing_media
+        value: 'false'
+    - delay: 300ms
     - script.execute: restart_wakeword_safely
 
   on_error:
@@ -474,19 +632,71 @@ script:
           value: 'false'
       - micro_wake_word.stop
 
-  # Triggers state 4 to reveal the now-playing overlay.
-  # Labels are updated directly by the text_sensor on_value callbacks
-  # (ha_media_title / ha_media_artist) so they are always current.
-  # on_play also calls this as a fallback in case the sensor fires
-  # before the state switches.
-  - id: update_now_playing
-    mode: restart
+  # --- Clock/weather label refresh ---
+  # Called on boot, every minute via on_time, and whenever state returns to 0.
+  - id: update_clock_display
+    mode: single
     then:
-      - script.execute:
-          id: set_anim_state
-          target_state: 4
+      - lvgl.label.update:
+          id: clock_label
+          text: !lambda |
+            auto t = id(ha_time).now();
+            if (!t.is_valid()) return std::string("--:--");
+            char buf[6];
+            snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.minute);
+            return std::string(buf);
+      - lvgl.label.update:
+          id: date_label
+          text: !lambda |
+            auto t = id(ha_time).now();
+            if (!t.is_valid()) return std::string("");
+            const char* days[]   = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
+            const char* months[] = {"January","February","March","April","May","June","July","August","September","October","November","December"};
+            char buf[40];
+            snprintf(buf, sizeof(buf), "%s, %d %s", days[t.day_of_week - 1], t.day_of_month, months[t.month - 1]);
+            return std::string(buf);
 
-  # States: 0=idle  1=listening  2=processing  3=replying  4=media playing
+  # --- Weather label refresh ---
+  # Re-reads current sensor states and updates labels. Covers the race where
+  # HA pushes initial state before LVGL widgets are ready (during boot) — the
+  # on_value callback fires but the update is lost. Called from on_boot after
+  # main_screen is revealed, and from the periodic 5-min wake script.
+  - id: refresh_weather_display
+    mode: single
+    then:
+      - lvgl.label.update:
+          id: weather_temp_label
+          text: !lambda |
+            float t = id(ha_temperature).state;
+            if (std::isnan(t)) return std::string("-- °C");
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.0f °C", t);
+            return std::string(buf);
+      - lvgl.label.update:
+          id: weather_icon_label
+          text: !lambda |
+            std::string x = id(ha_weather_condition).state;
+            if (x == "sunny")            return std::string("\U000F0597");
+            if (x == "clear-night")      return std::string("\U000F0594");
+            if (x == "partlycloudy")     return std::string("\U000F0595");
+            if (x == "cloudy")           return std::string("\U000F0590");
+            if (x == "rainy")            return std::string("\U000F0596");
+            if (x == "pouring")          return std::string("\U000F0596");
+            if (x == "snowy")            return std::string("\U000F0598");
+            if (x == "snowy-rainy")      return std::string("\U000F067F");
+            if (x == "fog")              return std::string("\U000F0591");
+            if (x == "hail")             return std::string("\U000F0592");
+            if (x == "lightning")        return std::string("\U000F0593");
+            if (x == "lightning-rainy")  return std::string("\U000F067E");
+            if (x == "windy" || x == "windy-variant") return std::string("\U000F059D");
+            return std::string("\U000F0590");
+
+  # --- Screen state manager ---
+  # State 0: clock/weather idle screen
+  # State 1: listening animation
+  # State 2: processing animation
+  # State 3: replying (TTS) animation
+  # State 4: Now Playing screen
   - id: set_anim_state
     mode: single
     parameters:
@@ -500,27 +710,41 @@ script:
                 id: current_anim_state
                 value: !lambda 'return target_state;'
 
+            # State 0: show clock/weather, hide everything else
             - if:
                 condition:
                   lambda: 'return target_state == 0;'
                 then:
                   - lvgl.widget.update:
-                      id: now_playing_info
+                      id: now_playing_screen
                       hidden: true
-                  - lvgl.animimg.update:
+                  - lvgl.widget.update:
                       id: state_anim
-                      src: [idle_01, idle_03, idle_05, idle_07, idle_09, idle_11, idle_13]
-                      duration: 2600ms
-                      repeat_count: forever
-                      auto_start: true
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: clock_weather_screen
+                      hidden: false
+                  - script.execute: update_clock_display
+
+            # States 1-3: show Ivy animation, hide clock and Now Playing
+            - if:
+                condition:
+                  lambda: 'return target_state >= 1 && target_state <= 3;'
+                then:
+                  - lvgl.widget.update:
+                      id: now_playing_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: clock_weather_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: state_anim
+                      hidden: false
 
             - if:
                 condition:
                   lambda: 'return target_state == 1;'
                 then:
-                  - lvgl.widget.update:
-                      id: now_playing_info
-                      hidden: true
                   - lvgl.animimg.update:
                       id: state_anim
                       src: [listening_01, listening_03, listening_05, listening_07, listening_09, listening_11, listening_13]
@@ -532,9 +756,6 @@ script:
                 condition:
                   lambda: 'return target_state == 2;'
                 then:
-                  - lvgl.widget.update:
-                      id: now_playing_info
-                      hidden: true
                   - lvgl.animimg.update:
                       id: state_anim
                       src: [processing_01, processing_03, processing_05, processing_07, processing_09, processing_11, processing_13]
@@ -546,9 +767,6 @@ script:
                 condition:
                   lambda: 'return target_state == 3;'
                 then:
-                  - lvgl.widget.update:
-                      id: now_playing_info
-                      hidden: true
                   - lvgl.animimg.update:
                       id: state_anim
                       src: [replying_01, replying_03, replying_05, replying_07, replying_09, replying_11, replying_13]
@@ -556,35 +774,34 @@ script:
                       repeat_count: forever
                       auto_start: true
 
+            # State 4: hide clock and animation, show Now Playing
             - if:
                 condition:
                   lambda: 'return target_state == 4;'
                 then:
-                  - lvgl.animimg.update:
-                      id: state_anim
-                      src: [replying_01, replying_03, replying_05, replying_07, replying_09, replying_11, replying_13]
-                      duration: 2600ms
-                      repeat_count: forever
-                      auto_start: true
                   - lvgl.widget.update:
-                      id: now_playing_info
+                      id: clock_weather_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: state_anim
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: now_playing_screen
                       hidden: false
 
   - id: restart_wakeword_safely
     mode: restart
     then:
-      - delay: 4s
+      - delay: 1s
       - if:
           condition:
             voice_assistant.connected
           then:
-            - logger.log: "Starting wake word (always-on for barge-in)"
             - script.execute: safe_wake_word_start
             - script.execute:
                 id: set_anim_state
                 target_state: 0
           else:
-            - logger.log: "Wake word start delayed; VA not connected"
             - delay: 3s
             - script.execute: restart_wakeword_safely
 
@@ -598,7 +815,7 @@ script:
   - id: pipeline_watchdog
     mode: restart
     then:
-      - delay: 10s
+      - delay: 12s
       - logger.log: "Watchdog triggered! Audio failed to load. Forcing recovery."
       - globals.set:
           id: va_speaking
@@ -610,11 +827,20 @@ script:
       - script.execute: restart_wakeword_safely
 
 
+# rotation: 180 moved to lvgl: block — uses P4 PPA hardware accelerator (ESPHome 2026.4.0)
 display:
   - platform: mipi_dsi
     id: my_display
     model: WAVESHARE-ESP32-P4-WIFI6-TOUCH-LCD-3.4C
-    rotation: 180
+    # Pepper's ghost hologram (github.com/veebch/pepper): the pyramid face
+    # reflects the source image with a horizontal mirror. Pre-mirror the
+    # source on X so text/images read correctly in the reflection.
+    # Rotation stays in the lvgl: block (uses P4 PPA). If mirror_x ends up
+    # backwards for your setup, try mirror_y: true instead (different
+    # pyramid orientations mirror different axes).
+    transform:
+      mirror_x: true
+      mirror_y: false
 
 output:
   - platform: ledc
@@ -683,39 +909,54 @@ image:
     - file: "Ivy/Assets/processing/processing-13.png"
       id: processing_13
 
-    - file: "Ivy/Assets/idle/idle-1.png"
-      id: idle_01
-    - file: "Ivy/Assets/idle/idle-3.png"
-      id: idle_03
-    - file: "Ivy/Assets/idle/idle-5.png"
-      id: idle_05
-    - file: "Ivy/Assets/idle/idle-7.png"
-      id: idle_07
-    - file: "Ivy/Assets/idle/idle-9.png"
-      id: idle_09
-    - file: "Ivy/Assets/idle/idle-11.png"
-      id: idle_11
-    - file: "Ivy/Assets/idle/idle-13.png"
-      id: idle_13
-
 font:
+  - file: "gfonts://Roboto"
+    id: roboto_72
+    size: 72
   - file: "gfonts://Roboto"
     id: roboto_48
     size: 48
+  - file: "gfonts://Roboto"
+    id: roboto_36
+    size: 36
+  - file: "gfonts://Roboto"
+    id: roboto_32
+    size: 32
   - file: "gfonts://Roboto"
     id: roboto_24
     size: 24
   - file: "gfonts://Roboto"
     id: roboto_18
     size: 18
+  # MDI weather icons — codepoints are from MaterialDesignIcons 7.x webfont.
+  # If an icon looks wrong, cross-check at materialdesignicons.com.
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_weather_font
+    size: 96
+    glyphs:
+      - "\U000F0590"  # weather-cloudy
+      - "\U000F0591"  # weather-fog
+      - "\U000F0592"  # weather-hail
+      - "\U000F0593"  # weather-lightning
+      - "\U000F0594"  # weather-night (clear-night)
+      - "\U000F0595"  # weather-partly-cloudy
+      - "\U000F0596"  # weather-rainy / pouring
+      - "\U000F0597"  # weather-sunny
+      - "\U000F0598"  # weather-snowy
+      - "\U000F059D"  # weather-windy
+      - "\U000F067E"  # weather-lightning-rainy
+      - "\U000F067F"  # weather-snowy-rainy
 
 lvgl:
+  rotation: 180
   displays:
     - my_display
   buffer_size: 2%
   byte_order: little_endian
   bg_color: 0x000000
   widgets:
+
+    # ---- 1. MAIN UI (hidden at boot) ----
     - obj:
         id: main_screen
         width: 100%
@@ -724,45 +965,87 @@ lvgl:
         border_width: 0
         hidden: true
         widgets:
+
+          # Clock/weather idle screen — visible in state 0
+          - obj:
+              id: clock_weather_screen
+              width: 100%
+              height: 100%
+              bg_color: 0x000000
+              border_width: 0
+              hidden: false
+              widgets:
+                - label:
+                    id: clock_label
+                    text: "--:--"
+                    align: CENTER
+                    y: -100
+                    text_color: 0xFFFFFF
+                    text_font: roboto_72
+                - label:
+                    id: date_label
+                    text: ""
+                    align: CENTER
+                    y: -10
+                    text_color: 0xCCCCCC
+                    text_font: roboto_36
+                - label:
+                    id: weather_icon_label
+                    text: ""
+                    align: CENTER
+                    y: 90
+                    text_color: 0xFFFFFF
+                    text_font: mdi_weather_font
+                - label:
+                    id: weather_temp_label
+                    text: "-- °C"
+                    align: CENTER
+                    y: 200
+                    text_color: 0xFFFFFF
+                    text_font: roboto_48
+
+          # Ivy animation — visible in states 1-3
           - animimg:
               id: state_anim
               align: CENTER
-              y: -50
-              src: [idle_01, idle_03, idle_05, idle_07, idle_09, idle_11, idle_13]
+              y: 0
+              src: [listening_01, listening_03, listening_05, listening_07, listening_09, listening_11, listening_13]
               duration: 2600ms
               repeat_count: forever
-              auto_start: true
+              auto_start: false
+              hidden: true
 
+          # Now Playing screen — visible in state 4.
+          # text_sensor always writes to now_playing_title so it is always
+          # current when this screen becomes visible.
           - obj:
-              id: now_playing_info
+              id: now_playing_screen
+              width: 100%
+              height: 100%
               align: CENTER
-              y: 155
-              width: 90%
-              height: 80
               bg_color: 0x000000
               border_width: 0
-              pad_all: 0
+              pad_all: 24
               hidden: true
               widgets:
                 - label:
-                    id: now_playing_title
                     text: "Now Playing"
-                    align: TOP_MID
-                    y: 0
-                    text_color: 0xFFFFFF
-                    text_font: roboto_24
-                    long_mode: SCROLL_CIRCULAR
-                    width: 90%
-                - label:
-                    id: now_playing_artist
-                    text: " "
-                    align: TOP_MID
-                    y: 34
-                    text_color: 0xAAAAAA
+                    align: CENTER
+                    y: -50
+                    text_color: 0x888888
                     text_font: roboto_18
+                - label:
+                    id: now_playing_title
+                    text: ""
+                    width: 85%
+                    align: CENTER
+                    y: 10
+                    text_align: CENTER
+                    text_color: 0xFFFFFF
+                    text_font: roboto_32
                     long_mode: SCROLL_CIRCULAR
-                    width: 90%
 
+    # ---- 2. BOOT UI (visible at boot) ----
     - obj:
         id: boot_screen
         width: 100%
@@ -781,9 +1064,9 @@ lvgl:
               id: boot_label
               text: "Initializing Hardware..."
               align: CENTER
-              y: 80
+              y: 100
               text_color: 0xFFFFFF
-              text_font: roboto_24
+              text_font: roboto_32
 
 # ------------- Controls -------------
 number:
