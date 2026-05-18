@@ -115,14 +115,14 @@ api:
   encryption:
     key: !secret waveshare_api
 
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: none
-  on_connect:
-      - lvgl.label.update:
-          id: boot_label
-          text: "WiFi Connected..."
   ap:
     ssid: "Esp32-P4-Touch-Lcd-4C"
     password: !secret ap_pwd
@@ -174,7 +174,7 @@ audio_dac:
     bits_per_sample: 16bit
     sample_rate: 16000
     use_mclk: true
-    mic_gain: 24DB
+    mic_gain: 24dB
 
 audio_adc:
   - platform: es7210
@@ -249,7 +249,7 @@ speaker:
     task_stack_in_psram: true
 
 psram:
-  speed: 100MHz
+  speed: 200MHz
 
 esp_ldo:
   - channel: 3
@@ -328,23 +328,7 @@ text_sensor:
     entity_id: weather.forecast_home
     on_value:
       then:
-        - lvgl.label.update:
-            id: weather_icon_label
-            text: !lambda |
-              if (x == "sunny")            return std::string("\U000F0597");
-              if (x == "clear-night")      return std::string("\U000F0594");
-              if (x == "partlycloudy")     return std::string("\U000F0595");
-              if (x == "cloudy")           return std::string("\U000F0590");
-              if (x == "rainy")            return std::string("\U000F0596");
-              if (x == "pouring")          return std::string("\U000F0596");
-              if (x == "snowy")            return std::string("\U000F0598");
-              if (x == "snowy-rainy")      return std::string("\U000F067F");
-              if (x == "fog")              return std::string("\U000F0591");
-              if (x == "hail")             return std::string("\U000F0592");
-              if (x == "lightning")        return std::string("\U000F0593");
-              if (x == "lightning-rainy")  return std::string("\U000F067E");
-              if (x == "windy" || x == "windy-variant") return std::string("\U000F059D");
-              return std::string("\U000F0590");
+        - script.execute: refresh_weather_display
 
 
 # ---- Media player ----
@@ -409,6 +393,7 @@ media_player:
             - script.execute:
                 id: set_anim_state
                 target_state: 0
+      # Brief settle window: lets the I2S pipeline drain before MWW restarts.
       - delay: 1s
       - script.execute: restart_wakeword_safely
 
@@ -628,6 +613,9 @@ script:
                 id: wake_word_running
                 value: 'true'
             - micro_wake_word.start
+            # NOTE: wake_word_running stays true even if micro_wake_word.start
+            # fails silently (no failure callback available). If the device gets
+            # stuck with WW apparently blocked, a restart via HA will clear it.
           else:
             - logger.log: "Wake word: already running, skipping start"
 
@@ -696,6 +684,8 @@ script:
             if (x == "lightning")        return std::string("\U000F0593");
             if (x == "lightning-rainy")  return std::string("\U000F067E");
             if (x == "windy" || x == "windy-variant") return std::string("\U000F059D");
+            if (x == "thunderstorm")  return std::string("\U000F0593");
+            if (x == "exceptional")   return std::string("\U000F0590");
             return std::string("\U000F0590");
 
   # --- Screen state manager ---
@@ -705,7 +695,7 @@ script:
   # State 3: replying (TTS) animation
   # State 4: Now Playing screen
   - id: set_anim_state
-    mode: single
+    mode: restart
     parameters:
       target_state: int
     then:
@@ -929,12 +919,6 @@ font:
   - file: "gfonts://Roboto"
     id: roboto_32
     size: 32
-  - file: "gfonts://Roboto"
-    id: roboto_24
-    size: 24
-  - file: "gfonts://Roboto"
-    id: roboto_18
-    size: 18
   # MDI weather icons — codepoints are from MaterialDesignIcons 7.x webfont.
   # If an icon looks wrong, cross-check at materialdesignicons.com.
   - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
@@ -958,7 +942,7 @@ lvgl:
   rotation: 180
   displays:
     - my_display
-  buffer_size: 2%
+  buffer_size: 10%
   byte_order: little_endian
   bg_color: 0x000000
   widgets:
@@ -1084,6 +1068,7 @@ number:
     max_value: 1.0
     step: 0.05
     optimistic: true
+    restore_value: true
     initial_value: 0.75
     on_value:
       then:
@@ -1102,6 +1087,7 @@ number:
     max_value: 1.0
     step: 0.05
     optimistic: true
+    restore_value: true
     initial_value: 0.45
     on_value:
       then:
