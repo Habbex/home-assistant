@@ -314,7 +314,7 @@ sensor:
 text_sensor:
   - platform: homeassistant
     id: ha_media_title
-    entity_id: media_player.waveshare_p4_touch_lcd_4_ai_media_player
+    entity_id: media_player.waveshare_p4_touch_lcd_4_ai_media_player_2
     attribute: media_title
     on_value:
       then:
@@ -360,17 +360,15 @@ media_player:
     task_stack_in_psram: true
 
     # on_play fires for BOTH music and TTS announcements. The va_speaking guard
-    # skips the music path during TTS. Wake word is stopped here because
-    # mic_raw (pre-AEC) picks up speaker output; running wake word during music
-    # causes false triggers. The on_idle handler (below) re-enables it after
-    # music stops.
+    # skips the music path during TTS. Wake word stays ACTIVE during music:
+    # probability_cutoff 0.60 + sliding_window_size 6 (= 120 ms of sustained
+    # high probability) rejects music false-triggers. The neural model handles
+    # speaker echo on raw audio better than on AEC-processed audio.
     on_play:
       - if:
           condition:
             lambda: 'return !id(va_speaking);'
           then:
-            - script.stop: restart_wakeword_safely
-            - script.execute: safe_wake_word_stop
             - if:
                 condition:
                   lambda: 'return abs(id(board_player).volume - id(music_volume_slider).state) > 0.04;'
@@ -418,12 +416,17 @@ media_player:
 # ---- Wake Word ----
 # Two models in parallel (hey_jarvis + hey_mycroft) — different phoneme
 # patterns give two chances to catch the wake word, helpful with a non-native
-# accent. mic_raw (pre-AEC) is correct here: the wake word model was trained
-# on raw mic audio; AEC post-processing distorts the phoneme characteristics
-# and reduces detection accuracy. mic_aec is only for the voice_assistant STT.
-# sliding_window_size: 4 — faster detection, less perceived lag.
-# probability_cutoff: 0.38 — sensitive at room distance; if music/TV causes
-# false triggers, raise toward 0.50.
+# accent. mic_raw (pre-AEC) is correct for wake word; the neural model handles
+# speaker echo on raw audio better than on AEC-processed audio (confirmed by
+# intercom-api docs: mic_aec caused ~10% detection rate during playback).
+# Wake word now stays ACTIVE during music (no stop in on_play).
+#
+# probability_cutoff: 0.60 — raised from 0.38 to reject music false-triggers.
+#   The model must score >60% confidence before firing.
+# sliding_window_size: 6 — model must sustain >60% for 6 frames (~120 ms).
+#   Music rarely sustains speech-like phoneme patterns for that long.
+#   To tune: if wake word misses → lower to 5 or 4; if false-triggers on music
+#   → raise to 7 or 8.
 micro_wake_word:
   id: my_wake_word
   microphone:
@@ -432,12 +435,15 @@ micro_wake_word:
   stop_after_detection: false
   models:
     - model: hey_jarvis
-      probability_cutoff: 0.38
-      sliding_window_size: 4
+      probability_cutoff: 0.60
+      sliding_window_size: 6
+    - model: hey_mycroft
+      probability_cutoff: 0.60
+      sliding_window_size: 6
   vad:
     model: github://esphome/micro-wake-word-models/models/v2/vad.json
-    probability_cutoff: 0.40
-    sliding_window_size: 4
+    probability_cutoff: 0.50
+    sliding_window_size: 6
 
   on_wake_word_detected:
     then:
@@ -1034,7 +1040,7 @@ lvgl:
                     align: CENTER
                     y: -50
                     text_color: 0x888888
-                    text_font: roboto_18
+                    text_font: roboto_48
                 - label:
                     id: now_playing_title
                     text: ""
@@ -1043,7 +1049,7 @@ lvgl:
                     y: 10
                     text_align: CENTER
                     text_color: 0xFFFFFF
-                    text_font: roboto_32
+                    text_font: roboto_48
                     long_mode: SCROLL_CIRCULAR
 
     # ---- 2. BOOT UI (visible at boot) ----
