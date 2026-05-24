@@ -83,3 +83,11 @@ This is the most fragile and most-edited part of the file. Key invariants to kno
 - **Plan docs are active, not historical.** `workplan.md`, `esphome-config/plan.md`, and `esphome-config/voice-rebuild-plan.md` describe in-flight work with line-anchored references into the YAML. Check them before starting non-trivial changes — there may already be an agreed-on approach.
 - **Secrets** are referenced as `!secret name` and live in `esphome-config/secrets.yaml` (gitignored). Don't inline secret values when editing the YAML.
 - **Hardware constants** worth knowing: `weather.forecast_home` is the user's HA weather entity (not `weather.home`); the device's friendly name is "WaveShare P4 Touch LCD 4 AI"; the wake words are `hey_jarvis` + `hey_mycroft`.
+
+## Relevant skills
+
+When the user's request fits, reach for these (they're registered globally, not project-bound, but they line up well with this repo):
+
+- **`esphome-code-assistant`** — for substantive ESPHome work: adding/editing components (audio, LVGL, sensors, lights, climate, etc.), lambdas, external components, troubleshooting compile or device errors, HA integration. Don't invoke it for one-line edits; do invoke it for new components or pipeline-level changes.
+- **`verify`** / **`run`** — when a change needs to be confirmed on the real device (compile + OTA + watch logs / behavior), not just by reading the diff.
+- **`code-review`** / **`review`** / **`security-review`** — for reviewing the current diff or a PR.
