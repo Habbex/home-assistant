@@ -478,9 +478,6 @@ micro_wake_word:
       - script.execute:
           id: set_anim_state
           target_state: 1
-      # Arm watchdog — backstop if HA never responds to pipeline start
-      # (on_listening never fires, so the watchdog never resets itself).
-      - script.execute: pipeline_watchdog
       - voice_assistant.start:
           wake_word: !lambda return wake_word;
       # Stop MWW AFTER VA starts to ensure smooth mic_raw → mic_aec transition.
@@ -543,7 +540,6 @@ voice_assistant:
     - script.execute: restart_wakeword_safely
 
   on_client_disconnected:
-    - script.stop: pipeline_watchdog
     - script.execute: safe_wake_word_stop
     - script.execute:
         id: set_anim_state
@@ -553,8 +549,6 @@ voice_assistant:
     - globals.set:
         id: stt_fired_this_cycle
         value: 'false'
-    # Restart watchdog — mode:restart resets the 12s timer from on_wake_word_detected.
-    - script.execute: pipeline_watchdog
     - script.execute:
         id: set_anim_state
         target_state: 1
@@ -563,7 +557,6 @@ voice_assistant:
     - globals.set:
         id: stt_fired_this_cycle
         value: 'true'
-    - script.execute: pipeline_watchdog
     - logger.log:
         format: "STT heard: %s"
         args: ["x.c_str()"]
@@ -572,7 +565,6 @@ voice_assistant:
         target_state: 2
 
   on_tts_start:
-    - script.stop: pipeline_watchdog
     - globals.set:
         id: va_speaking
         value: 'true'
@@ -591,7 +583,6 @@ voice_assistant:
         target_state: 3
 
   on_end:
-    - script.stop: pipeline_watchdog
     - logger.log:
         format: "VA cycle end — free heap: %u  free PSRAM: %u"
         args: ["esp_get_free_heap_size()", "heap_caps_get_free_size(MALLOC_CAP_SPIRAM)"]
@@ -629,7 +620,6 @@ voice_assistant:
     - script.execute: restart_wakeword_safely
 
   on_error:
-    - script.stop: pipeline_watchdog
     - logger.log:
         format: "VA error %d: %s"
         args: ["code", "message.c_str()"]
@@ -863,23 +853,6 @@ script:
       - delay: 5min
       - light.turn_off: screen_backlight
       - logger.log: "Screen idle timeout reached. Turning off display."
-
-  - id: pipeline_watchdog
-    mode: restart
-    then:
-      - delay: 12s
-      - logger.log: "Watchdog triggered! Pipeline hung. Forcing recovery."
-      # Stop the VA pipeline explicitly — without this, a hung session stays
-      # open and blocks micro_wake_word.start in restart_wakeword_safely.
-      - voice_assistant.stop
-      - globals.set:
-          id: va_speaking
-          value: 'false'
-      - media_player.stop: board_player
-      - script.execute:
-          id: set_anim_state
-          target_state: 0
-      - script.execute: restart_wakeword_safely
 
 
 # rotation: 180 moved to lvgl: block — uses P4 PPA hardware accelerator (ESPHome 2026.4.0)
