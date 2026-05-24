@@ -75,6 +75,18 @@ esp32:
           # ║  TTS download fails → pipeline error → device broken.        ║
           # ║  STREAMING_MODE (the default) is the only compatible mode.   ║
           # ╚══════════════════════════════════════════════════════════════╝
+          # P4 memory optimisations (from esphome-intercom docs):
+          # L2 cache 256 KB — default 128 KB is too small for MIPI DSI +
+          # audio + LVGL; cold-start cache misses cause ~1 s audio glitch.
+          CONFIG_CACHE_L2_CACHE_256KB: y
+          # Move firmware code and read-only data to PSRAM, freeing
+          # internal SRAM for DMA-capable allocations.
+          CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
+          CONFIG_SPIRAM_RODATA: y
+          # TLS buffers in PSRAM — each TTS/media HTTPS session needs ~40 KB
+          # for MbedTLS; without this they land in internal SRAM and exhaust
+          # it after 2-3 sessions (the "fills up" symptom).
+          CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: y
 
 logger:
   level: INFO
@@ -98,8 +110,8 @@ logger:
     i2s_audio.speaker: WARN
     i2s_audio.microphone: WARN
     i2s_duplex: WARN
-    i2s_duplex.spk: WARN
-    i2s_duplex.mic: WARN
+    i2s_duplex.speaker_volume: WARN
+    i2s_duplex.mic_gain: WARN
     audio_dac: WARN
     audio_adc: WARN
     esp_aec: WARN
@@ -163,8 +175,11 @@ switch:
       - logger.log: "Wake word MUTED via Home Assistant"
 
 external_components:
-  - source: github://n-IA-hane/intercom-api
-    components: [i2s_audio_duplex, esp_aec, audio_processor]
+  - source:
+      type: git
+      url: https://github.com/n-IA-hane/esphome-intercom
+      ref: main
+    components: [audio_processor, i2s_audio_duplex, esp_aec]
 
 audio_dac:
   - platform: es8311
@@ -188,8 +203,13 @@ audio_adc:
 esp_aec:
   id: aec_processor
   sample_rate: 16000
-  mode: voip_high_perf
-  filter_length: 2
+  # sr_low_cost: linear-only AEC (no RES), preserves spectral features
+  # for MWW. voip_high_perf has a Residual Echo Suppressor that drops MWW
+  # detection from 10/10 to 2/10 and burns 64% Core 0 vs 22% here.
+  mode: sr_low_cost
+  # filter_length 4 × 32 ms frame = 128 ms tail (recommended for sr modes
+  # with an integrated codec; was 2 which gives only 64 ms coverage).
+  filter_length: 4
 
 i2s_audio_duplex:
   id: i2s_duplex
@@ -200,18 +220,15 @@ i2s_audio_duplex:
   i2s_dout_pin: GPIO9
   sample_rate: 16000
   output_sample_rate: 16000
+  # processor_id links the AEC to the duplex bus (new API replacing the
+  # older implicit wiring between esp_aec and i2s_audio_duplex).
+  processor_id: aec_processor
   use_stereo_aec_reference: true
-  # ring_buffer mode gives better AEC delay alignment than previous_frame.
-  # 100 ms matches the original aec_reference_buffer_ms value.
-  aec_reference: ring_buffer
-  aec_reference_buffer_ms: 100
-  aec_ref_ring_in_psram: true
   # ESP32-P4 is RISC-V; the default dsps_fird_s16 SIMD decimator is
   # unreliable on this core (esp-dsp issues #117/#102). Use the scalar
   # float path instead.
   fir_decimator: custom
-  # Move non-DMA audio buffers to PSRAM (~15 KB internal RAM freed,
-  # reducing SDIO RX OOM pressure).
+  # Move non-DMA audio buffers to PSRAM (~15-20 KB internal RAM freed).
   buffers_in_psram: true
 
 microphone:
@@ -401,15 +418,17 @@ media_player:
 # ---- Wake Word ----
 # Two models in parallel (hey_jarvis + hey_mycroft) — different phoneme
 # patterns give two chances to catch the wake word, helpful with a non-native
-# accent. mic_raw (pre-AEC) is correct for wake word; the neural model handles
-# speaker echo on raw audio better than on AEC-processed audio (confirmed by
-# intercom-api docs: mic_aec caused ~10% detection rate during playback).
-# Wake word now stays ACTIVE during music (no stop in on_play).
+# accent.
+#
+# mic_raw (pre-AEC): MWW and VA use separate mic consumers (mic_raw vs mic_aec).
+# This means stopping MWW (safe_wake_word_stop in on_listening) does not stop
+# mic_aec — VA's mic path stays independent. If voice_assistant.start silently
+# fails, mic_raw keeps running so the device stays in a working state.
+# With sr_low_cost AEC, mic_raw works well for wake word detection since the
+# SR engine has no RES to distort the spectral features MWW relies on.
 #
 # probability_cutoff: 0.60 — raised from 0.38 to reject music false-triggers.
-#   The model must score >60% confidence before firing.
 # sliding_window_size: 6 — model must sustain >60% for 6 frames (~120 ms).
-#   Music rarely sustains speech-like phoneme patterns for that long.
 #   To tune: if wake word misses → lower to 5 or 4; if false-triggers on music
 #   → raise to 7 or 8.
 micro_wake_word:
@@ -444,17 +463,31 @@ micro_wake_word:
           then:
             - media_player.pause: board_player
             - delay: 600ms
+      # Stop any running session and wait for IDLE.
+      # voice_assistant.start silently no-ops if VA is not IDLE.
+      # 3s timeout handles slow HA pipeline teardown (confirmed >1s in practice).
       - voice_assistant.stop
+      - wait_until:
+          condition:
+            not:
+              voice_assistant.is_running:
+          timeout: 3s
       - logger.log:
           format: "Wake word detected: %s"
           args: ["wake_word.c_str()"]
       - script.execute:
           id: set_anim_state
           target_state: 1
-      - script.execute: safe_wake_word_stop
-      - delay: 100ms
+      # Arm watchdog — backstop if HA never responds to pipeline start
+      # (on_listening never fires, so the watchdog never resets itself).
+      - script.execute: pipeline_watchdog
       - voice_assistant.start:
           wake_word: !lambda return wake_word;
+      # Stop MWW AFTER VA starts to ensure smooth mic_raw → mic_aec transition.
+      # mic_raw stops, but mic_aec is already active reading from i2s_duplex.
+      # Small delay ensures voice_assistant.start has time to activate mic_aec.
+      - delay: 100ms
+      - script.execute: safe_wake_word_stop
 
 
 # Global flags
@@ -497,6 +530,7 @@ globals:
 # volume_multiplier: 4.0 — additional software pre-amp on top of the 36dB
 # codec gain; gives the most pickup at room distance without distortion.
 voice_assistant:
+  id: va_engine
   microphone:
     microphone: mic_aec
     gain_factor: 10
@@ -509,6 +543,7 @@ voice_assistant:
     - script.execute: restart_wakeword_safely
 
   on_client_disconnected:
+    - script.stop: pipeline_watchdog
     - script.execute: safe_wake_word_stop
     - script.execute:
         id: set_anim_state
@@ -518,6 +553,8 @@ voice_assistant:
     - globals.set:
         id: stt_fired_this_cycle
         value: 'false'
+    # Restart watchdog — mode:restart resets the 12s timer from on_wake_word_detected.
+    - script.execute: pipeline_watchdog
     - script.execute:
         id: set_anim_state
         target_state: 1
@@ -554,6 +591,11 @@ voice_assistant:
         target_state: 3
 
   on_end:
+    - script.stop: pipeline_watchdog
+    - logger.log:
+        format: "VA cycle end — free heap: %u  free PSRAM: %u"
+        args: ["esp_get_free_heap_size()", "heap_caps_get_free_size(MALLOC_CAP_SPIRAM)"]
+        level: INFO
     - script.execute: screen_idle_timer
     - globals.set:
         id: va_speaking
@@ -587,6 +629,7 @@ voice_assistant:
     - script.execute: restart_wakeword_safely
 
   on_error:
+    - script.stop: pipeline_watchdog
     - logger.log:
         format: "VA error %d: %s"
         args: ["code", "message.c_str()"]
@@ -744,7 +787,7 @@ script:
                 then:
                   - lvgl.animimg.update:
                       id: state_anim
-                      src: [listening_01, listening_03, listening_05, listening_07, listening_09, listening_11, listening_13]
+                      src: [listening_01, listening_03, listening_05, listening_09, listening_13]
                       duration: 2600ms
                       repeat_count: forever
                       auto_start: true
@@ -755,7 +798,7 @@ script:
                 then:
                   - lvgl.animimg.update:
                       id: state_anim
-                      src: [processing_01, processing_03, processing_05, processing_07, processing_09, processing_11, processing_13]
+                      src: [processing_01, processing_03, processing_05, processing_09, processing_13]
                       duration: 2600ms
                       repeat_count: forever
                       auto_start: true
@@ -766,7 +809,7 @@ script:
                 then:
                   - lvgl.animimg.update:
                       id: state_anim
-                      src: [replying_01, replying_03, replying_05, replying_07, replying_09, replying_11, replying_13]
+                      src: [replying_01, replying_03, replying_05, replying_09, replying_13]
                       duration: 2600ms
                       repeat_count: forever
                       auto_start: true
@@ -794,10 +837,22 @@ script:
           condition:
             voice_assistant.connected
           then:
-            - script.execute: safe_wake_word_start
-            - script.execute:
-                id: set_anim_state
-                target_state: 0
+            # Don't start MWW if VA is actively in a session (listening /
+            # processing / replying). This prevents a stale on_end from a
+            # previous cycle restarting MWW mid-session and causing a spurious
+            # double-detection while the user is speaking.
+            - if:
+                condition:
+                  lambda: 'return id(current_anim_state) == 0 || id(current_anim_state) == 4;'
+                then:
+                  - script.execute: safe_wake_word_start
+                  - if:
+                      condition:
+                        lambda: 'return id(current_anim_state) == 0;'
+                      then:
+                        - script.execute:
+                            id: set_anim_state
+                            target_state: 0
           else:
             - delay: 3s
             - script.execute: restart_wakeword_safely
@@ -813,7 +868,10 @@ script:
     mode: restart
     then:
       - delay: 12s
-      - logger.log: "Watchdog triggered! Audio failed to load. Forcing recovery."
+      - logger.log: "Watchdog triggered! Pipeline hung. Forcing recovery."
+      # Stop the VA pipeline explicitly — without this, a hung session stays
+      # open and blocks micro_wake_word.start in restart_wakeword_safely.
+      - voice_assistant.stop
       - globals.set:
           id: va_speaking
           value: 'false'
@@ -858,7 +916,7 @@ image:
     type: rgb565
     byte_order: little_endian
     transparency: alpha_channel
-    resize: 280x280
+    resize: 240x240
 
   images:
     - file: "Ivy/Assets/listening/listening-1.png"
@@ -867,12 +925,8 @@ image:
       id: listening_03
     - file: "Ivy/Assets/listening/listening-5.png"
       id: listening_05
-    - file: "Ivy/Assets/listening/listening-7.png"
-      id: listening_07
     - file: "Ivy/Assets/listening/listening-9.png"
       id: listening_09
-    - file: "Ivy/Assets/listening/listening-11.png"
-      id: listening_11
     - file: "Ivy/Assets/listening/listening-13.png"
       id: listening_13
 
@@ -882,12 +936,8 @@ image:
       id: replying_03
     - file: "Ivy/Assets/replying/replying-5.png"
       id: replying_05
-    - file: "Ivy/Assets/replying/replying-7.png"
-      id: replying_07
     - file: "Ivy/Assets/replying/replying-9.png"
       id: replying_09
-    - file: "Ivy/Assets/replying/replying-11.png"
-      id: replying_11
     - file: "Ivy/Assets/replying/replying-13.png"
       id: replying_13
 
@@ -897,12 +947,8 @@ image:
       id: processing_03
     - file: "Ivy/Assets/processing/processing-5.png"
       id: processing_05
-    - file: "Ivy/Assets/processing/processing-7.png"
-      id: processing_07
     - file: "Ivy/Assets/processing/processing-9.png"
       id: processing_09
-    - file: "Ivy/Assets/processing/processing-11.png"
-      id: processing_11
     - file: "Ivy/Assets/processing/processing-13.png"
       id: processing_13
 
@@ -1000,7 +1046,7 @@ lvgl:
               id: state_anim
               align: CENTER
               y: 0
-              src: [listening_01, listening_03, listening_05, listening_07, listening_09, listening_11, listening_13]
+              src: [listening_01, listening_03, listening_05, listening_09, listening_13]
               duration: 2600ms
               repeat_count: forever
               auto_start: false
