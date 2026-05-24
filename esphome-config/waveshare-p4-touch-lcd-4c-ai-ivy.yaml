@@ -26,23 +26,22 @@ esphome:
             text: "Home Assistant: Linked"
         - delay: 400ms
 
-        # THE JUMPSTART FIX:
-        # Force the engine to cycle ONCE to clear the I2S/SDIO buffers
+        # Native VA-MWW integration: voice_assistant owns the wake-word
+        # lifecycle. enable_model is required for any model after the first
+        # (ESPHome MWW persists per-model enabled state to flash; only the
+        # first listed model is enabled on first boot). Idempotent on later
+        # boots — safe to keep here.
         - lvgl.label.update:
             id: boot_label
-            text: "Starting Duplex Audio..."
-        - micro_wake_word.stop
-        - globals.set:
-            id: wake_word_running
-            value: 'false'
+            text: "Starting Voice Assistant..."
+        - micro_wake_word.enable_model: hey_jarvis_model
+        - micro_wake_word.enable_model: hey_mycroft_model
+        - voice_assistant.start_continuous
         - delay: 500ms
-        - script.execute: safe_wake_word_start
-
-        # Now we wait for the system to settle into the detecting state
         - lvgl.label.update:
             id: boot_label
-            text: "AEC & Wake Word: OK"
-        - delay: 800ms
+            text: "Voice Assistant: Ready"
+        - delay: 400ms
 
         # FINISH: Hide boot, reveal main screen, populate clock, start idle timer
         - lvgl.widget.update:
@@ -168,10 +167,10 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
     turn_on_action:
-      - script.execute: safe_wake_word_start
+      - voice_assistant.start_continuous
       - logger.log: "Wake word ENABLED via Home Assistant"
     turn_off_action:
-      - script.execute: safe_wake_word_stop
+      - voice_assistant.stop
       - logger.log: "Wake word MUTED via Home Assistant"
 
 external_components:
@@ -223,7 +222,11 @@ i2s_audio_duplex:
   # processor_id links the AEC to the duplex bus (new API replacing the
   # older implicit wiring between esp_aec and i2s_audio_duplex).
   processor_id: aec_processor
-  use_stereo_aec_reference: true
+  # false: our entire audio path is mono (single-channel codec, mixer,
+  # resampler, speaker). A stereo reference would either zero or duplicate
+  # the second channel for no AEC benefit while doubling the reference
+  # buffer in PSRAM.
+  use_stereo_aec_reference: false
   # ESP32-P4 is RISC-V; the default dsps_fird_s16 SIMD decimator is
   # unreliable on this core (esp-dsp issues #117/#102). Use the scalar
   # float path instead.
@@ -410,22 +413,24 @@ media_player:
             - script.execute:
                 id: set_anim_state
                 target_state: 0
-      # Brief settle window: lets the I2S pipeline drain before MWW restarts.
-      - delay: 1s
-      - script.execute: restart_wakeword_safely
 
 
 # ---- Wake Word ----
 # Two models in parallel (hey_jarvis + hey_mycroft) — different phoneme
 # patterns give two chances to catch the wake word, helpful with a non-native
-# accent.
+# accent. Each model needs an `id:` so on_boot can call enable_model on
+# the second one (ESPHome only auto-enables the first model on first boot;
+# the enabled state then persists in flash).
 #
-# mic_raw (pre-AEC): MWW and VA use separate mic consumers (mic_raw vs mic_aec).
-# This means stopping MWW (safe_wake_word_stop in on_listening) does not stop
-# mic_aec — VA's mic path stays independent. If voice_assistant.start silently
-# fails, mic_raw keeps running so the device stays in a working state.
-# With sr_low_cost AEC, mic_raw works well for wake word detection since the
-# SR engine has no RES to distort the spectral features MWW relies on.
+# Approach B (mic topology): MWW reads `mic_raw` (pre-AEC) while
+# voice_assistant reads `mic_aec` (post-AEC). With sr_low_cost AEC the raw
+# path preserves the spectral features the neural model needs; routing MWW
+# through AEC dropped detection in earlier tests.
+#
+# Native VA-MWW integration (see voice_assistant: block below): the
+# voice_assistant component owns the wake-word → listen → STT → TTS → idle
+# lifecycle. No on_wake_word_detected handler here — VA emits its own
+# on_wake_word_detected trigger we hook for UI side effects.
 #
 # probability_cutoff: 0.60 — raised from 0.38 to reject music false-triggers.
 # sliding_window_size: 6 — model must sustain >60% for 6 frames (~120 ms).
@@ -436,12 +441,13 @@ micro_wake_word:
   microphone:
     microphone: mic_raw
     gain_factor: 6
-  stop_after_detection: false
   models:
     - model: hey_jarvis
+      id: hey_jarvis_model
       probability_cutoff: 0.60
       sliding_window_size: 6
     - model: hey_mycroft
+      id: hey_mycroft_model
       probability_cutoff: 0.60
       sliding_window_size: 6
   vad:
@@ -449,52 +455,10 @@ micro_wake_word:
     probability_cutoff: 0.50
     sliding_window_size: 6
 
-  on_wake_word_detected:
-    then:
-      - light.turn_on: screen_backlight
-      - script.execute: screen_idle_timer
-      - globals.set:
-          id: was_playing_media
-          value: !lambda "return id(board_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;"
-      - if:
-          condition:
-            media_player.is_playing:
-              id: board_player
-          then:
-            - media_player.pause: board_player
-            - delay: 600ms
-      # Stop any running session and wait for IDLE.
-      # voice_assistant.start silently no-ops if VA is not IDLE.
-      # 3s timeout handles slow HA pipeline teardown (confirmed >1s in practice).
-      - voice_assistant.stop
-      - wait_until:
-          condition:
-            not:
-              voice_assistant.is_running:
-          timeout: 3s
-      - logger.log:
-          format: "Wake word detected: %s"
-          args: ["wake_word.c_str()"]
-      - script.execute:
-          id: set_anim_state
-          target_state: 1
-      - voice_assistant.start:
-          wake_word: !lambda return wake_word;
-      # Stop MWW AFTER VA starts to ensure smooth mic_raw → mic_aec transition.
-      # mic_raw stops, but mic_aec is already active reading from i2s_duplex.
-      # Small delay ensures voice_assistant.start has time to activate mic_aec.
-      - delay: 100ms
-      - script.execute: safe_wake_word_stop
-
 
 # Global flags
 globals:
   - id: was_playing_media
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-
-  - id: wake_word_running
     type: bool
     restore_value: false
     initial_value: 'false'
@@ -531,19 +495,39 @@ voice_assistant:
   microphone:
     microphone: mic_aec
     gain_factor: 10
+  micro_wake_word: my_wake_word
   media_player: board_player
   noise_suppression_level: 4
   auto_gain: 31dBFS
   volume_multiplier: 4.0
 
   on_client_connected:
-    - script.execute: restart_wakeword_safely
+    # If HA reconnects after a drop, re-enter MWW-listening mode.
+    - voice_assistant.start_continuous
 
   on_client_disconnected:
-    - script.execute: safe_wake_word_stop
     - script.execute:
         id: set_anim_state
         target_state: 0
+
+  # VA emits its own on_wake_word_detected; we hook it for UI/media side
+  # effects only. No control-flow calls to voice_assistant.start —
+  # that's the lifecycle VA owns now.
+  on_wake_word_detected:
+    - light.turn_on: screen_backlight
+    - script.execute: screen_idle_timer
+    - logger.log:
+        format: "Wake word detected: %s"
+        args: ["wake_word.c_str()"]
+    - globals.set:
+        id: was_playing_media
+        value: !lambda "return id(board_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;"
+    - if:
+        condition:
+          media_player.is_playing:
+            id: board_player
+        then:
+          - media_player.pause: board_player
 
   on_listening:
     - globals.set:
@@ -616,8 +600,6 @@ voice_assistant:
     - globals.set:
         id: was_playing_media
         value: 'false'
-    - delay: 300ms
-    - script.execute: restart_wakeword_safely
 
   on_error:
     - logger.log:
@@ -629,37 +611,9 @@ voice_assistant:
     - script.execute:
         id: set_anim_state
         target_state: 0
-    - delay: 250ms
-    - script.execute: restart_wakeword_safely
 
 
 script:
-  - id: safe_wake_word_start
-    mode: single
-    then:
-      - if:
-          condition:
-            lambda: 'return !id(wake_word_running);'
-          then:
-            - logger.log: "Wake word: starting"
-            - globals.set:
-                id: wake_word_running
-                value: 'true'
-            - micro_wake_word.start
-            # NOTE: wake_word_running stays true even if micro_wake_word.start
-            # fails silently (no failure callback available). If the device gets
-            # stuck with WW apparently blocked, a restart via HA will clear it.
-          else:
-            - logger.log: "Wake word: already running, skipping start"
-
-  - id: safe_wake_word_stop
-    mode: single
-    then:
-      - globals.set:
-          id: wake_word_running
-          value: 'false'
-      - micro_wake_word.stop
-
   # --- Clock/weather label refresh ---
   # Called on boot, every minute via on_time, and whenever state returns to 0.
   - id: update_clock_display
@@ -818,34 +772,6 @@ script:
                   - lvgl.widget.update:
                       id: now_playing_screen
                       hidden: false
-
-  - id: restart_wakeword_safely
-    mode: restart
-    then:
-      - delay: 1s
-      - if:
-          condition:
-            voice_assistant.connected
-          then:
-            # Don't start MWW if VA is actively in a session (listening /
-            # processing / replying). This prevents a stale on_end from a
-            # previous cycle restarting MWW mid-session and causing a spurious
-            # double-detection while the user is speaking.
-            - if:
-                condition:
-                  lambda: 'return id(current_anim_state) == 0 || id(current_anim_state) == 4;'
-                then:
-                  - script.execute: safe_wake_word_start
-                  - if:
-                      condition:
-                        lambda: 'return id(current_anim_state) == 0;'
-                      then:
-                        - script.execute:
-                            id: set_anim_state
-                            target_state: 0
-          else:
-            - delay: 3s
-            - script.execute: restart_wakeword_safely
 
   - id: screen_idle_timer
     mode: restart
