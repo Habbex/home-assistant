@@ -26,17 +26,22 @@ esphome:
             text: "Home Assistant: Linked"
         - delay: 400ms
 
-        # Native VA-MWW integration: voice_assistant owns the wake-word
-        # lifecycle. enable_model is required for any model after the first
-        # (ESPHome MWW persists per-model enabled state to flash; only the
-        # first listed model is enabled on first boot). Idempotent on later
-        # boots — safe to keep here.
+        # Wake-word lifecycle:
+        #   micro_wake_word runs locally and fires on_wake_word_detected
+        #   (defined in the micro_wake_word: block below), which then calls
+        #   voice_assistant.start for a single STT/TTS cycle. We do NOT call
+        #   voice_assistant.start_continuous — with use_wake_word: false
+        #   (the default), continuous mode makes VA ask HA for STT
+        #   immediately on every IDLE, bypassing wake-word entirely.
+        #
+        #   enable_model is idempotent and ensures the hey_jarvis model is
+        #   active even if a previous flash left a different model enabled
+        #   in MWW's persisted per-model flash state.
         - lvgl.label.update:
             id: boot_label
             text: "Starting Voice Assistant..."
         - micro_wake_word.enable_model: hey_jarvis_model
-        - micro_wake_word.enable_model: hey_mycroft_model
-        - voice_assistant.start_continuous
+        - micro_wake_word.start
         - delay: 500ms
         - lvgl.label.update:
             id: boot_label
@@ -167,18 +172,23 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
     turn_on_action:
-      - voice_assistant.start_continuous
+      - micro_wake_word.start
       - logger.log: "Wake word ENABLED via Home Assistant"
     turn_off_action:
-      - voice_assistant.stop
+      - micro_wake_word.stop
       - logger.log: "Wake word MUTED via Home Assistant"
 
 external_components:
+  # Pinned to v2026.5.0 (May 14, 2026): audio engine rebuild — cleaner I2S
+  # lifecycle, better AEC reference handling, AudioProcessor interface that
+  # makes esp_aec/esp_afe drop-in interchangeable behind i2s_audio_duplex.
+  # Floating ref: main lets upstream churn break the device on every flash;
+  # bump this tag deliberately when picking up a new release.
   - source:
       type: git
       url: https://github.com/n-IA-hane/esphome-intercom
-      ref: main
-    components: [audio_processor, i2s_audio_duplex, esp_aec]
+      ref: v2026.5.0
+    components: [audio_processor, i2s_audio_duplex, esp_afe]
 
 audio_dac:
   - platform: es8311
@@ -199,16 +209,36 @@ audio_adc:
     sample_rate: 16000
     mic_gain: 24dB
 
-esp_aec:
+# Full audio front-end: AEC + Noise Suppression + AGC in one pipeline.
+# Replaces esp_aec (AEC only) — same MWW-safe sr+low_cost AEC core, plus
+# WebRTC NS and AGC on the post-AEC path. mic_raw (pre-AEC) still feeds
+# MWW with the raw mic untouched by NS/AGC, so wake-word accuracy is
+# unaffected. mic_aec (post-processor) now carries the fully cleaned-up
+# audio to the voice assistant — better STT in noisy / music-playing
+# conditions.
+#
+# Internal RAM cost: ~100 KB (vs ~80 KB for esp_aec). CPU: ~23% Core 0
+# (vs ~22%). Defaults aec_enabled / ns_enabled / agc_enabled are all
+# true; vad_enabled / se_enabled stay false (VA does its own VAD
+# server-side; SE requires mic_num: 2 which we don't run).
+#
+# NOTE: voice_assistant.noise_suppression_level: 4 (line ~522) now
+# double-applies NS — AFE WebRTC NS, then VA's own WebRTC NS. If STT
+# sounds over-processed in soak testing, drop VA's level to 0–2 and
+# let AFE do all the NS work. Doing it in one commit at a time keeps
+# the change bisectable.
+#
+# Buffer placement (feed_buf_in_psram / feed_ring_in_psram /
+# fetch_ring_in_psram) intentionally left at default false. The
+# component README documents that P4 boards keep AFE staging buffers
+# in internal RAM — past P4 tests showed esp-sr is sensitive to PSRAM
+# placement on this core.
+esp_afe:
   id: aec_processor
-  sample_rate: 16000
-  # sr_low_cost: linear-only AEC (no RES), preserves spectral features
-  # for MWW. voip_high_perf has a Residual Echo Suppressor that drops MWW
-  # detection from 10/10 to 2/10 and burns 64% Core 0 vs 22% here.
-  mode: sr_low_cost
-  # filter_length 4 × 32 ms frame = 128 ms tail (recommended for sr modes
-  # with an integrated codec; was 2 which gives only 64 ms coverage).
-  filter_length: 4
+  type: sr            # speech recognition (linear AEC, preserves MWW spectrum)
+  mode: low_cost      # ~23% Core 0, MWW-compatible 10/10 — see component README
+  mic_num: 1          # single logical mic via i2s_audio_duplex
+  aec_filter_length: 4  # 4 × 32 ms = 128 ms echo tail
 
 i2s_audio_duplex:
   id: i2s_duplex
@@ -416,21 +446,24 @@ media_player:
 
 
 # ---- Wake Word ----
-# Two models in parallel (hey_jarvis + hey_mycroft) — different phoneme
-# patterns give two chances to catch the wake word, helpful with a non-native
-# accent. Each model needs an `id:` so on_boot can call enable_model on
-# the second one (ESPHome only auto-enables the first model on first boot;
-# the enabled state then persists in flash).
+# Single model: hey_jarvis.
 #
 # Approach B (mic topology): MWW reads `mic_raw` (pre-AEC) while
 # voice_assistant reads `mic_aec` (post-AEC). With sr_low_cost AEC the raw
 # path preserves the spectral features the neural model needs; routing MWW
 # through AEC dropped detection in earlier tests.
 #
-# Native VA-MWW integration (see voice_assistant: block below): the
-# voice_assistant component owns the wake-word → listen → STT → TTS → idle
-# lifecycle. No on_wake_word_detected handler here — VA emits its own
-# on_wake_word_detected trigger we hook for UI side effects.
+# MWW → VA wiring: the `micro_wake_word:` key inside voice_assistant only
+# syncs the active-wake-words list to HA's UI; it does NOT auto-start VA on
+# detection. on_wake_word_detected below is the real wiring — local MWW
+# detection calls voice_assistant.start (one-shot), which sends a single
+# STT/TTS request to HA and returns to IDLE. We do NOT use
+# voice_assistant.start_continuous: with use_wake_word: false (default) it
+# bypasses wake-word gating and starts STT immediately on every IDLE.
+#
+# MWW has stop_after_detection: true (default) — it stops itself after
+# firing so TTS playback can't re-trigger it through the pre-AEC mic. We
+# restart it from voice_assistant.on_end / on_error.
 #
 # probability_cutoff: 0.60 — raised from 0.38 to reject music false-triggers.
 # sliding_window_size: 6 — model must sustain >60% for 6 frames (~120 ms).
@@ -446,14 +479,28 @@ micro_wake_word:
       id: hey_jarvis_model
       probability_cutoff: 0.60
       sliding_window_size: 6
-    - model: hey_mycroft
-      id: hey_mycroft_model
-      probability_cutoff: 0.60
-      sliding_window_size: 6
   vad:
     model: github://esphome/micro-wake-word-models/models/v2/vad.json
     probability_cutoff: 0.50
     sliding_window_size: 6
+  on_wake_word_detected:
+    - light.turn_on: screen_backlight
+    - script.execute: screen_idle_timer
+    - logger.log:
+        format: "Wake word detected: %s"
+        args: ["wake_word.c_str()"]
+    - globals.set:
+        id: was_playing_media
+        value: !lambda "return id(board_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;"
+    - if:
+        condition:
+          media_player.is_playing:
+            id: board_player
+        then:
+          - media_player.pause: board_player
+    # Pass the matched wake word through so HA's pipeline gets the phrase.
+    - voice_assistant.start:
+        wake_word: !lambda "return wake_word;"
 
 
 # Global flags
@@ -502,32 +549,19 @@ voice_assistant:
   volume_multiplier: 4.0
 
   on_client_connected:
-    # If HA reconnects after a drop, re-enter MWW-listening mode.
-    - voice_assistant.start_continuous
+    # MWW is what we actually need running for wake-word; ensure it is up
+    # after an HA reconnect. Idempotent if already running.
+    - micro_wake_word.start
 
   on_client_disconnected:
     - script.execute:
         id: set_anim_state
         target_state: 0
 
-  # VA emits its own on_wake_word_detected; we hook it for UI/media side
-  # effects only. No control-flow calls to voice_assistant.start —
-  # that's the lifecycle VA owns now.
-  on_wake_word_detected:
-    - light.turn_on: screen_backlight
-    - script.execute: screen_idle_timer
-    - logger.log:
-        format: "Wake word detected: %s"
-        args: ["wake_word.c_str()"]
-    - globals.set:
-        id: was_playing_media
-        value: !lambda "return id(board_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;"
-    - if:
-        condition:
-          media_player.is_playing:
-            id: board_player
-        then:
-          - media_player.pause: board_player
+  # NOTE: voice_assistant.on_wake_word_detected fires only when HA performs
+  # server-side wake-word detection (use_wake_word: true). We use local MWW,
+  # so HA never sends VOICE_ASSISTANT_WAKE_WORD_END — wake-word UI side
+  # effects live in micro_wake_word.on_wake_word_detected instead.
 
   on_listening:
     - globals.set:
@@ -571,6 +605,14 @@ voice_assistant:
         format: "VA cycle end — free heap: %u  free PSRAM: %u"
         args: ["esp_get_free_heap_size()", "heap_caps_get_free_size(MALLOC_CAP_SPIRAM)"]
         level: INFO
+    # MWW has stop_after_detection: true (the default — prevents TTS audio
+    # from re-triggering it via the pre-AEC mic). Restart it here so the
+    # next "Hey Jarvis" can fire.
+    - if:
+        condition:
+          switch.is_on: wake_word_toggle
+        then:
+          - micro_wake_word.start
     - script.execute: screen_idle_timer
     - globals.set:
         id: va_speaking
@@ -608,6 +650,13 @@ voice_assistant:
     - globals.set:
         id: va_speaking
         value: 'false'
+    # Recover wake-word listening after a failed cycle (otherwise MWW stays
+    # stopped from stop_after_detection and the device goes deaf).
+    - if:
+        condition:
+          switch.is_on: wake_word_toggle
+        then:
+          - micro_wake_word.start
     - script.execute:
         id: set_anim_state
         target_state: 0
