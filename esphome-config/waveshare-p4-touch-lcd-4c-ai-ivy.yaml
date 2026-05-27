@@ -105,7 +105,7 @@ logger:
     speaker_media_player: WARN
     speaker_media_player.pipeline: WARN
     audio: WARN
-    audio_reader: WARN
+    audio_reader: WARN  # was DEBUG: bumping logger.level to DEBUG to compile in DEBUG calls floods SDIO ISR on P4 and asserts in copy_payload. Use alternative diagnostic instead (see voice-rebuild-plan.md).
     audio.decoder: WARN
     speaker_mixer: WARN
     resampler_speaker: WARN
@@ -123,6 +123,17 @@ logger:
     homeassistant.text_sensor: WARN
     light: WARN
     sensor: WARN
+
+# Runtime diagnostics for the ESP_FAIL-after-N-cycles investigation.
+# Surfaces free heap / largest contiguous block / free PSRAM as HA sensors
+# so we can graph the trend across VA cycles. If `Heap Free` drops
+# monotonically (e.g., 80 → 65 → 50 → fail) → device-side leak/fragmentation.
+# If `Heap Free` is flat across many cycles but ESP_FAIL still fires →
+# network/HA-side TTS issue (not the device). `Heap Max Block` falling
+# faster than `Heap Free` is the fragmentation signature specifically.
+# Remove this block once the root cause is identified.
+debug:
+  update_interval: 15s
 
 # Enable Home Assistant API
 # NOTE: on_client_connected label update removed — redundant with the
@@ -153,6 +164,12 @@ esp32_hosted:
   d1_pin: GPIO15
   d2_pin: GPIO16
   d3_pin: GPIO17
+  # DO NOT set sdio_frequency: 20MHz — tried 2026-05-27, device bricks
+  # at boot (black screen, no logs). The C6 slave firmware is compiled
+  # expecting 40 MHz and there is no clock negotiation. Stick with the
+  # default 40 MHz; address SDIO buffer-pool exhaustion via PSRAM
+  # placement (use_psram: true) once esphome/esphome#16627 lands in a
+  # stable release (post 2026.5.1).
 
 i2c:
   sda: GPIO7
@@ -180,15 +197,20 @@ switch:
 
 external_components:
   # Pinned to v2026.5.0 (May 14, 2026): audio engine rebuild — cleaner I2S
-  # lifecycle, better AEC reference handling, AudioProcessor interface that
-  # makes esp_aec/esp_afe drop-in interchangeable behind i2s_audio_duplex.
-  # Floating ref: main lets upstream churn break the device on every flash;
-  # bump this tag deliberately when picking up a new release.
+  # lifecycle, better AEC reference handling. Floating ref: main lets
+  # upstream churn break the device on every flash; bump this tag
+  # deliberately when picking up a new release.
+  #
+  # esp_aec (not esp_afe) — esp_afe was tried 2026-05-27 and reverted: the
+  # extra ~20 KB internal-RAM footprint + feed/fetch tasks on Core 1
+  # starved the hosted-Wi-Fi SDIO RX task during TTS bursts, asserting in
+  # sdio_drv.c (copy_payload / sdio_rx_get_buffer). esp_aec is synchronous,
+  # no separate tasks, no extra RAM — stable.
   - source:
       type: git
       url: https://github.com/n-IA-hane/esphome-intercom
       ref: v2026.5.0
-    components: [audio_processor, i2s_audio_duplex, esp_afe]
+    components: [audio_processor, i2s_audio_duplex, esp_aec]
 
 audio_dac:
   - platform: es8311
@@ -209,36 +231,16 @@ audio_adc:
     sample_rate: 16000
     mic_gain: 24dB
 
-# Full audio front-end: AEC + Noise Suppression + AGC in one pipeline.
-# Replaces esp_aec (AEC only) — same MWW-safe sr+low_cost AEC core, plus
-# WebRTC NS and AGC on the post-AEC path. mic_raw (pre-AEC) still feeds
-# MWW with the raw mic untouched by NS/AGC, so wake-word accuracy is
-# unaffected. mic_aec (post-processor) now carries the fully cleaned-up
-# audio to the voice assistant — better STT in noisy / music-playing
-# conditions.
-#
-# Internal RAM cost: ~100 KB (vs ~80 KB for esp_aec). CPU: ~23% Core 0
-# (vs ~22%). Defaults aec_enabled / ns_enabled / agc_enabled are all
-# true; vad_enabled / se_enabled stay false (VA does its own VAD
-# server-side; SE requires mic_num: 2 which we don't run).
-#
-# NOTE: voice_assistant.noise_suppression_level: 4 (line ~522) now
-# double-applies NS — AFE WebRTC NS, then VA's own WebRTC NS. If STT
-# sounds over-processed in soak testing, drop VA's level to 0–2 and
-# let AFE do all the NS work. Doing it in one commit at a time keeps
-# the change bisectable.
-#
-# Buffer placement (feed_buf_in_psram / feed_ring_in_psram /
-# fetch_ring_in_psram) intentionally left at default false. The
-# component README documents that P4 boards keep AFE staging buffers
-# in internal RAM — past P4 tests showed esp-sr is sensitive to PSRAM
-# placement on this core.
-esp_afe:
+esp_aec:
   id: aec_processor
-  type: sr            # speech recognition (linear AEC, preserves MWW spectrum)
-  mode: low_cost      # ~23% Core 0, MWW-compatible 10/10 — see component README
-  mic_num: 1          # single logical mic via i2s_audio_duplex
-  aec_filter_length: 4  # 4 × 32 ms = 128 ms echo tail
+  sample_rate: 16000
+  # sr_low_cost: linear-only AEC (no RES), preserves spectral features
+  # for MWW. voip_high_perf has a Residual Echo Suppressor that drops MWW
+  # detection from 10/10 to 2/10 and burns 64% Core 0 vs 22% here.
+  mode: sr_low_cost
+  # filter_length 4 × 32 ms frame = 128 ms tail (recommended for sr modes
+  # with an integrated codec; was 2 which gives only 64 ms coverage).
+  filter_length: 4
 
 i2s_audio_duplex:
   id: i2s_duplex
@@ -284,7 +286,12 @@ speaker:
     id: audio_mixer
     output_speaker: hw_speaker
     num_channels: 1
-    task_stack_in_psram: true
+    # task_stack_in_psram removed 2026-05-27: ESPHome 2026.5.1 bumped
+    # ESP-IDF, which now asserts in cache_utils.c when ANY task with a
+    # PSRAM stack exists while a flash op runs (NVS writes, OTA, etc.).
+    # The assert fires regardless of which task does the flash op, so
+    # all three of our audio tasks (mixer / resampler / media_player)
+    # need their stacks back in internal RAM. Cost: ~16 KB total.
     source_speakers:
       - id: va_speaker_mix
         timeout: 500ms
@@ -296,7 +303,6 @@ speaker:
     output_speaker: media_speaker_mix
     sample_rate: 16000
     num_channels: 1
-    task_stack_in_psram: true
 
 psram:
   speed: 200MHz
@@ -354,6 +360,23 @@ sensor:
               snprintf(buf, sizeof(buf), "%.0f °C", x);
               return std::string(buf);
 
+  # ---- Heap / PSRAM diagnostics (paired with `debug:` block above) ----
+  # entity_category: diagnostic hides these from the main HA UI by default
+  # but they appear in the device's diagnostic panel and are graphable.
+  - platform: debug
+    free:
+      name: "Heap Free"
+      id: heap_free
+      entity_category: diagnostic
+    block:
+      name: "Heap Max Block"
+      id: heap_max_block
+      entity_category: diagnostic
+    psram:
+      name: "PSRAM Free"
+      id: psram_free
+      entity_category: diagnostic
+
 # ---- Track metadata and weather condition from Home Assistant ----
 # Entity ID confirmed from HA device page: media_player.waveshare_p4_touch_lcd_4_ai
 # NOTE: No state guard here — we always update the label text regardless of
@@ -391,7 +414,7 @@ media_player:
     volume_max: 0.8
     volume_increment: 0.05
     buffer_size: 131072
-    task_stack_in_psram: true
+    # task_stack_in_psram removed 2026-05-27 — see audio_mixer comment.
 
     # on_play fires for BOTH music and TTS announcements. The va_speaking guard
     # skips the music path during TTS. Wake word stays ACTIVE during music:

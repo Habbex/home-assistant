@@ -8,7 +8,21 @@
       "Read(//tmp/**)",
       "Bash(python3 -c ' *)",
       "WebFetch(domain:www.home-assistant.io)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(git -C /home/eok/src/home-assistant diff --stat esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml)",
+      "Bash(git -C /home/eok/src/home-assistant add esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml esphome-config/voice-rebuild-plan.md)",
+      "Bash(git -C /home/eok/src/home-assistant commit -m ' *)",
+      "Bash(git -C /home/eok/src/home-assistant ls-files esphome-config/)",
+      "Bash(git -C /home/eok/src/home-assistant check-ignore -v esphome-config/voice-rebuild-plan.md esphome-config/plan.md esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml)",
+      "Bash(git -C /home/eok/src/home-assistant reset HEAD esphome-config/voice-rebuild-plan.md)",
+      "Bash(git -C /home/eok/src/home-assistant add esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml)",
+      "Bash(git -C /home/eok/src/home-assistant diff --stat)",
+      "Bash(git *)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh api *)",
+      "WebFetch(domain:community.home-assistant.io)",
+      "Bash(python3 -c \"import yaml; yaml.safe_load\\(open\\('/home/eok/src/home-assistant/esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml'\\)\\)\")",
+      "Read(//var/run/**)"
     ]
   }
 }
