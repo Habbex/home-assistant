@@ -1,95 +1,155 @@
 esphome:
   name: waveshare-34-ai-ivy
-  friendly_name: WaveShare P4 Touch LCD 4 AI 
+  friendly_name: WaveShare P4 Touch LCD 4 AI
   name_add_mac_suffix: false
   on_boot:
-    priority: -100 
-    then:
-      - lvgl.label.update:
-          id: boot_label
-          text: "Hardware Initialized..."
-      - delay: 1s
+      priority: -100
+      then:
+        - lvgl.label.update:
+            id: boot_label
+            text: "Hardware Initialized..."
+        - delay: 1s
 
-      # Wait for WiFi (milestone 1)
-      - wait_until:
-          wifi.connected:
-      - lvgl.label.update:
-          id: boot_label
-          text: "WiFi: Connected"
-      - delay: 800ms
+        # Wait for WiFi (milestone 1)
+        - wait_until:
+            wifi.connected:
+        - lvgl.label.update:
+            id: boot_label
+            text: "WiFi: Connected"
+        - delay: 400ms
 
-      # Wait for Home Assistant (milestone 2)
-      - wait_until:
-          api.connected:
-      - lvgl.label.update:
-          id: boot_label
-          text: "Home Assistant: Linked"
-      - delay: 800ms
+        # Wait for Home Assistant (milestone 2)
+        - wait_until:
+            api.connected:
+        - lvgl.label.update:
+            id: boot_label
+            text: "Home Assistant: Linked"
+        - delay: 400ms
 
-      # THE JUMPSTART FIX: 
-      # We force the engine to Cycle ONCE to clear the I2S/SDIO buffers
-      - lvgl.label.update:
-          id: boot_label
-          text: "Starting Duplex Audio..."
-      - micro_wake_word.stop
-      - delay: 500ms
-      - micro_wake_word.start
-      
-      # Now we wait for the system to settle into the detecting state
-      - lvgl.label.update:
-          id: boot_label
-          text: "AEC & Wake Word: OK"
-      - delay: 1.5s 
+        # Wake-word lifecycle:
+        #   micro_wake_word runs locally and fires on_wake_word_detected
+        #   (defined in the micro_wake_word: block below), which then calls
+        #   voice_assistant.start for a single STT/TTS cycle. We do NOT call
+        #   voice_assistant.start_continuous — with use_wake_word: false
+        #   (the default), continuous mode makes VA ask HA for STT
+        #   immediately on every IDLE, bypassing wake-word entirely.
+        #
+        #   enable_model is idempotent and ensures the hey_jarvis model is
+        #   active even if a previous flash left a different model enabled
+        #   in MWW's persisted per-model flash state.
+        - lvgl.label.update:
+            id: boot_label
+            text: "Starting Voice Assistant..."
+        - micro_wake_word.enable_model: hey_jarvis_model
+        - micro_wake_word.start
+        - delay: 500ms
+        - lvgl.label.update:
+            id: boot_label
+            text: "Voice Assistant: Ready"
+        - delay: 400ms
 
-      # FINISH: Hide boot, reveal Ivy
-      - lvgl.widget.update:
-          id: boot_screen
-          hidden: true
-      - lvgl.widget.update:
-          id: main_screen
-          hidden: false
-      - script.execute: screen_idle_timer
-    
+        # FINISH: Hide boot, reveal main screen, populate clock, start idle timer
+        - lvgl.widget.update:
+            id: boot_screen
+            hidden: true
+        - lvgl.widget.update:
+            id: main_screen
+            hidden: false
+        - script.execute: update_clock_display
+        - script.execute: refresh_weather_display
+        - script.execute: screen_idle_timer
 
 esp32:
   board: esp32-p4
-  flash_size: 32Mb
+  flash_size: 32MB
   framework:
     type: esp-idf
     advanced:
       enable_idf_experimental_features: yes
     sdkconfig_options:
           CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT: y
+          # ╔══════════════════════════════════════════════════════════════╗
+          # ║  DO NOT change SDIO RX mode to RX_NONE or RX_MAX_SIZE.      ║
+          # ║  The C6 slave firmware is compiled with streaming mode ON.   ║
+          # ║  It batches multiple Wi-Fi packets into one SDIO transfer    ║
+          # ║  (observed: 2869–7530 byte batches).                         ║
+          # ║  Per-packet modes cap at ESP_RX_BUFFER_SIZE = 1536 bytes     ║
+          # ║  (sdio_reg.h:41) and reject all larger batches with          ║
+          # ║  "Len from slave[N] exceeds max [1536]" → TCP abort →        ║
+          # ║  TTS download fails → pipeline error → device broken.        ║
+          # ║  STREAMING_MODE (the default) is the only compatible mode.   ║
+          # ╚══════════════════════════════════════════════════════════════╝
+          # P4 memory optimisations (from esphome-intercom docs):
+          # L2 cache 256 KB — default 128 KB is too small for MIPI DSI +
+          # audio + LVGL; cold-start cache misses cause ~1 s audio glitch.
+          CONFIG_CACHE_L2_CACHE_256KB: y
+          # XIP from PSRAM — the P4-correct option for running
+          # instruction/rodata fetches from PSRAM. The old ESP32-S3
+          # options (CONFIG_SPIRAM_FETCH_INSTRUCTIONS / RODATA) are
+          # silently ignored on P4; this is the unified replacement.
+          # Matches the reference waveshare-p4-touch config.
+          CONFIG_SPIRAM_XIP_FROM_PSRAM: "y"
+          # TLS buffers in PSRAM — each TTS/media HTTPS session needs ~40 KB
+          # for MbedTLS; without this they land in internal SRAM and exhaust
+          # it after 2-3 sessions (the "fills up" symptom).
+          CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: y
 
 logger:
-  level: DEBUG
-  # logs:
-  #   mipi_dsi: DEBUG
-  #   lvgl: DEBUG
+  level: INFO
   hardware_uart: UART0
+  # Tag names below are the actual ones in ESPHome 2026.4.x source
+  # (media_player.cpp, speaker_media_player.cpp, etc.). NOTE: lines like
+  # `[S][media_player]: 'X' >> IDLE` come from aioesphomeapi's client-side
+  # state_log_formatter.py — they are NOT device logs and CANNOT be
+  # suppressed here. Use `esphome logs --no-states` to hide them.
+  logs:
+    media_player: WARN
+    speaker_media_player: WARN
+    speaker_media_player.pipeline: WARN
+    audio: WARN
+    audio_reader: WARN  # was DEBUG: bumping logger.level to DEBUG to compile in DEBUG calls floods SDIO ISR on P4 and asserts in copy_payload. Use alternative diagnostic instead (see voice-rebuild-plan.md).
+    audio.decoder: WARN
+    speaker_mixer: WARN
+    resampler_speaker: WARN
+    speaker: WARN
+    i2s_audio: WARN
+    i2s_audio.speaker: WARN
+    i2s_audio.microphone: WARN
+    esp_audio_stack: WARN
+    esp_audio_stack.speaker_volume: WARN
+    esp_audio_stack.mic_gain: WARN
+    esp_aec: WARN
+    number: WARN
+    homeassistant.text_sensor: WARN
+    light: WARN
+    sensor: WARN
+
+# Runtime diagnostics for the ESP_FAIL-after-N-cycles investigation.
+# Surfaces free heap / largest contiguous block / free PSRAM as HA sensors
+# so we can graph the trend across VA cycles. If `Heap Free` drops
+# monotonically (e.g., 80 → 65 → 50 → fail) → device-side leak/fragmentation.
+# If `Heap Free` is flat across many cycles but ESP_FAIL still fires →
+# network/HA-side TTS issue (not the device). `Heap Max Block` falling
+# faster than `Heap Free` is the fragmentation signature specifically.
+# Remove this block once the root cause is identified.
+debug:
+  update_interval: 15s
 
 # Enable Home Assistant API
+# NOTE: on_client_connected label update removed — redundant with the
+# wait_until: api.connected step in on_boot.
 api:
   encryption:
     key: !secret waveshare_api
-  on_client_connected:
-      - lvgl.label.update:
-          id: boot_label
-          text: "Home Assistant Linked..."
 
-# ota:
-#   - platform: esphome
-#     password: !secret ota_password
+ota:
+  - platform: esphome
+    password: !secret ota_password
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: none
-  on_connect:
-      - lvgl.label.update:
-          id: boot_label
-          text: "WiFi Connected..."
-  # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     ssid: "Esp32-P4-Touch-Lcd-4C"
     password: !secret ap_pwd
@@ -97,15 +157,20 @@ wifi:
 esp32_hosted:
   active_high: true
   variant: ESP32C6
-  # C6 reset/enable (CHIP_PU)
   reset_pin: GPIO54
-  # SDIO host pins on the ESP32-P4 side (from board routing)
   cmd_pin: GPIO19
   clk_pin: GPIO18
   d0_pin: GPIO14
   d1_pin: GPIO15
   d2_pin: GPIO16
   d3_pin: GPIO17
+  use_psram: true
+  # DO NOT set sdio_frequency: 20MHz — tried 2026-05-27, device bricks
+  # at boot (black screen, no logs). The C6 slave firmware is compiled
+  # expecting 40 MHz and there is no clock negotiation. Stick with the
+  # default 40 MHz; address SDIO buffer-pool exhaustion via PSRAM
+  # placement (use_psram: true) once esphome/esphome#16627 lands in a
+  # stable release (post 2026.5.1).
 
 i2c:
   sda: GPIO7
@@ -113,7 +178,13 @@ i2c:
   scan: false
   id: internal_i2c
 
-# Optional: power amp enable (active high per Waveshare)
+network:
+  # On hosted P4+C6 the bottleneck is INTERNAL|DMA headroom.
+  # Prevent ESPHome from enabling the high_performance preset 
+  # (which it does automatically for media players) to stop
+  # the SDIO driver from asserting on buffer starvation.
+  enable_high_performance: false
+
 switch:
   - platform: gpio
     pin: GPIO53
@@ -124,8 +195,7 @@ switch:
     name: "Enable Wake Word"
     id: wake_word_toggle
     optimistic: true
-    # Defaults to ON when the board boots
-    restore_mode: RESTORE_DEFAULT_ON 
+    restore_mode: RESTORE_DEFAULT_ON
     turn_on_action:
       - micro_wake_word.start
       - logger.log: "Wake word ENABLED via Home Assistant"
@@ -134,140 +204,100 @@ switch:
       - logger.log: "Wake word MUTED via Home Assistant"
 
 external_components:
-  - source: github://n-IA-hane/intercom-api
-    components: [i2s_audio_duplex, esp_aec]
+  # Pinned to v2026.6.2 (June 7, 2026): GMF audio stack migration —
+  # i2s_audio_duplex replaced by esp_audio_stack with embedded codec
+  # config. Better runtime/memory behavior, cleaner I2S lifecycle.
+  # Floating ref: main lets upstream churn break the device on every
+  # flash; bump this tag deliberately when picking up a new release.
+  #
+  # esp_aec (not esp_afe) — esp_afe was tried 2026-05-27 and reverted:
+  # the extra ~20 KB internal-RAM footprint + feed/fetch tasks on Core 1
+  # starved the hosted-Wi-Fi SDIO RX task during TTS bursts. esp_aec is
+  # synchronous, no separate tasks, no extra RAM — stable.
+  # TODO: re-evaluate esp_afe on v2026.6.2 (GMF runtime improvements
+  # may have fixed the SDIO starvation issue on the P4).
+  - source:
+      type: git
+      url: https://github.com/n-IA-hane/esphome-intercom
+      ref: v2026.6.2
+    components: [audio_processor, esp_audio_stack, esp_aec, speaker]
 
-audio_dac:
-  - platform: es8311
-    id: es8311_dac
-    i2c_id: internal_i2c
-    address: 0x18
-    bits_per_sample: 16bit
-    # FORCED TO 16kHz to prevent SDIO bus crashes
-    sample_rate: 16000           
-    use_mclk: true
-    mic_gain: 24DB
-
-audio_adc:
-  - platform: es7210
-    id: es7210_adc
-    i2c_id: internal_i2c
-    address: 0x40
-    bits_per_sample: 16bit
-    # FORCED TO 16kHz
-    sample_rate: 16000           
-    mic_gain: 24dB
+# audio_dac / audio_adc blocks removed — codec config is now embedded in
+# esp_audio_stack below (v2026.6.0 migration: standalone codec components
+# are no longer the supported path).
 
 esp_aec:
   id: aec_processor
   sample_rate: 16000
-  mode: voip_high_perf
-  filter_length: 8
+  # sr_low_cost: linear-only AEC (no RES), preserves spectral features
+  # for MWW. voip_high_perf has a Residual Echo Suppressor that drops MWW
+  # detection from 10/10 to 2/10 and burns 64% Core 0 vs 22% here.
+  mode: sr_low_cost
+  # filter_length 4 × 32 ms frame = 128 ms tail (recommended for sr modes
+  # with an integrated codec; was 2 which gives only 64 ms coverage).
+  filter_length: 4
 
-i2s_audio_duplex:
-  id: i2s_duplex
+esp_audio_stack:
+  id: audio_stack
   i2s_lrclk_pin: GPIO10
   i2s_bclk_pin: GPIO12
   i2s_mclk_pin: GPIO13
   i2s_din_pin: GPIO11
   i2s_dout_pin: GPIO9
-  # BOTH NATIVELY 16kHz - Completely eliminates the need for CPU-heavy resamplers
-  sample_rate: 16000           
-  output_sample_rate: 16000    
-  aec_id: aec_processor
-  use_stereo_aec_reference: true
-  aec_reference_delay_ms: 120
+  sample_rate: 16000
+  output_sample_rate: 16000
+  processor_id: aec_processor
+  # Move non-DMA audio buffers to PSRAM (~15-20 KB internal RAM freed).
+  buffers_in_psram: true
+  audio_task_stack_in_psram: false
+  # Codec config: ES8311 (DAC/speaker) + ES7210 (ADC/mic) on shared I2C.
+  codec:
+    i2c_id: internal_i2c
+    input:
+      type: es7210
+      address: 0x40
+      gain_db: 24.0
+    output:
+      type: es8311
+      address: 0x18
+      use_mclk: true
 
 microphone:
-  - platform: i2s_audio_duplex
+  - platform: esp_audio_stack
     id: mic_aec
-    i2s_audio_duplex_id: i2s_duplex
+    esp_audio_stack_id: audio_stack
 
-  - platform: i2s_audio_duplex
-    id: mic_raw
-    i2s_audio_duplex_id: i2s_duplex
-    pre_aec: true
-
-# The Cleaned Mixer Setup (No Resamplers!)
 speaker:
-  - platform: i2s_audio_duplex
+  - platform: esp_audio_stack
     id: hw_speaker
-    i2s_audio_duplex_id: i2s_duplex
+    esp_audio_stack_id: audio_stack
     sample_rate: 16000
+    bits_per_sample: "16"
 
   - platform: mixer
     id: audio_mixer
     output_speaker: hw_speaker
     num_channels: 1
+    bits_per_sample: "16"
+    task_stack_in_psram: false
+    # task_stack_in_psram removed 2026-05-27: ESPHome 2026.5.1 bumped
+    # ESP-IDF, which now asserts in cache_utils.c when ANY task with a
+    # PSRAM stack exists while a flash op runs (NVS writes, OTA, etc.).
+    # The assert fires regardless of which task does the flash op, so
+    # all three of our audio tasks (mixer / resampler / media_player)
+    # need their stacks back in internal RAM. Cost: ~16 KB total.
     source_speakers:
       - id: va_speaker_mix
-        timeout: 50ms
+        timeout: 500ms
       - id: media_speaker_mix
-        timeout: 50ms
+        timeout: 500ms
 
   - platform: resampler
     id: music_resampler
     output_speaker: media_speaker_mix
-
-# Old
-# i2s_audio:
-#   id: i2s_bus
-#   i2s_mclk_pin: GPIO13
-#   i2s_bclk_pin: GPIO12
-#   i2s_lrclk_pin: GPIO10
-
-# audio_dac:
-#   - platform: es8311
-#     id: es8311_dac
-#     i2c_id: bus_a
-#     address: 0x18
-
-# audio_adc:
-#   - platform: es7210
-#     id: es7210_adc
-#     i2c_id: bus_a
-#     address: 0x40
-#     sample_rate: 16000
-#     bits_per_sample: 16bit
-#     mic_gain: 12
-
-# speaker:
-#   - platform: i2s_audio
-#     id: board_speaker
-#     i2s_audio_id: i2s_bus
-#     dac_type: external
-#     i2s_dout_pin: GPIO9 
-#     channel: stereo
-#     audio_dac: es8311_dac
-#     buffer_duration: 100ms
-#     bits_per_sample: 16bit
-#     sample_rate: 16000 # Locked to 16kHz
-
-#   - platform: mixer
-#     id: mixing_speaker
-#     output_speaker: board_speaker
-#     source_speakers:
-#       - id: announcement_mixing_input
-#         # A short timeout ensures the speaker releases the I2S bus quickly 
-#         # so the microphone can take over again.
-#         timeout: 50ms 
-#       - id: media_mixing_input
-#         timeout: 50ms
-
-# microphone:
-#   - platform: i2s_audio
-#     id: board_mic
-#     i2s_audio_id: i2s_bus
-#     adc_type: external
-#     i2s_din_pin: GPIO11 
-#     sample_rate: 16000
-#     bits_per_sample: 16bit
-#     channel: stereo 
-  
-    # on_data:
-    #   - logger.log:
-    #       format: "Mic bytes: %d"
-    #       args: ["x.size()"]
+    sample_rate: 16000
+    num_channels: 1
+    task_stack_in_psram: false
 
 psram:
   speed: 200MHz
@@ -276,203 +306,464 @@ esp_ldo:
   - channel: 3
     voltage: 2.5V
 
-# ---- Media player (ESPHome entity for playback) ----
+# ---- Clock ----
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time:
+      - seconds: 0
+        then:
+          - if:
+              condition:
+                lambda: 'return id(current_anim_state) == 0;'
+              then:
+                - script.execute: update_clock_display
+
+      # Every 5 minutes, wake the display briefly to show date/time/weather.
+      # Only fires when idle (state 0) — never interrupts VA or media playback.
+      - seconds: 0
+        minutes: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+        then:
+          - if:
+              condition:
+                lambda: 'return id(current_anim_state) == 0;'
+              then:
+                - light.turn_on: screen_backlight
+                - script.execute: update_clock_display
+                - script.execute: refresh_weather_display
+                - delay: 30s
+                - if:
+                    condition:
+                      lambda: 'return id(current_anim_state) == 0;'
+                    then:
+                      - light.turn_off: screen_backlight
+
+# ---- Weather temperature from Home Assistant ----
+# Verify your entity ID: HA → Settings → Devices & Services → weather integration
+sensor:
+  - platform: homeassistant
+    id: ha_temperature
+    entity_id: weather.forecast_home
+    attribute: temperature
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: weather_temp_label
+            text: !lambda |
+              if (std::isnan(x)) return std::string("-- °C");
+              char buf[16];
+              snprintf(buf, sizeof(buf), "%.0f °C", x);
+              return std::string(buf);
+
+  # ---- Heap / PSRAM diagnostics (paired with `debug:` block above) ----
+  # entity_category: diagnostic hides these from the main HA UI by default
+  # but they appear in the device's diagnostic panel and are graphable.
+  - platform: debug
+    free:
+      name: "Heap Free"
+      id: heap_free
+      entity_category: diagnostic
+    block:
+      name: "Heap Max Block"
+      id: heap_max_block
+      entity_category: diagnostic
+    psram:
+      name: "PSRAM Free"
+      id: psram_free
+      entity_category: diagnostic
+
+# ---- Track metadata and weather condition from Home Assistant ----
+# Entity ID confirmed from HA device page: media_player.waveshare_p4_touch_lcd_4_ai
+# NOTE: No state guard here — we always update the label text regardless of
+# current screen state. The label widget is hidden when not in state 4 anyway,
+# so there is no visual side effect. The previous guard (current_anim_state == 4)
+# was the bug — the sensor fires BEFORE on_play switches to state 4, so the
+# label was never populated.
+text_sensor:
+  - platform: homeassistant
+    id: ha_media_title
+    entity_id: media_player.waveshare_p4_touch_lcd_4_ai_media_player_2
+    attribute: media_title
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: now_playing_title
+            text: !lambda |
+              return x.empty() ? std::string("Unknown Track") : x;
+
+  - platform: homeassistant
+    id: ha_weather_condition
+    entity_id: weather.forecast_home
+    on_value:
+      then:
+        - script.execute: refresh_weather_display
+
+
+# ---- Media player ----
 media_player:
   - platform: speaker
     id: board_player
-    name: "P4 Audio"
+    name: "Media Player"
     codec_support_enabled: true
-    volume_min: 0.5
-    volume_max: 0.75
+    volume_min: 0.2
+    volume_max: 0.8
     volume_increment: 0.05
-    buffer_size: 256000
+    buffer_size: 131072
+    task_stack_in_psram: false
+    # task_stack_in_psram removed 2026-05-27 — see audio_mixer comment.
 
+    # on_play fires for BOTH music and TTS announcements. The va_speaking guard
+    # skips the music path during TTS. Wake word stays ACTIVE during music:
+    # probability_cutoff 0.60 + sliding_window_size 6 (= 120 ms of sustained
+    # high probability) rejects music false-triggers. The neural model handles
+    # speaker echo on raw audio better than on AEC-processed audio.
     on_play:
-      - logger.log: "Audio playing! Triggering replying animation."
-      - lvgl.animimg.update:
-          id: state_anim
-          src: [replying_01, replying_03,  replying_05, replying_07, replying_09, replying_11, replying_13]
-          duration: 2600ms
-          repeat_count: forever
-          auto_start: true
-  
+      - if:
+          condition:
+            lambda: 'return abs(id(board_player).volume - id(music_volume_slider).state) > 0.04;'
+          then:
+            - media_player.volume_set:
+                id: board_player
+                volume: !lambda "return id(music_volume_slider).state;"
+      - script.execute:
+          id: set_anim_state
+          target_state: 4
+
     announcement_pipeline:
           speaker: va_speaker_mix
           format: WAV
           sample_rate: 16000
           num_channels: 1
-          
+
     media_pipeline:
-          speaker: music_resampler 
-          format: WAV
+          speaker: music_resampler
+          format: FLAC
           sample_rate: 16000
           num_channels: 1
 
     on_idle:
-      - logger.log: "Media player idle (playback finished)"
-      # - script.execute: restart_wakeword_safelymusic_resampler
+      # Return to the clock/weather screen immediately so a wake word
+      # during the settle window doesn't find us stuck in state 4.
+      - if:
+          condition:
+            lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
+          then:
+            - media_player.volume_set:
+                id: board_player
+                volume: !lambda "return id(va_volume_slider).state;"
+      - script.execute:
+          id: set_anim_state
+          target_state: 0
 
-
-# ---- Voice Assistant (uses mic + media_player for replies) ----
+# ---- Wake Word ----
+# Single model: hey_jarvis.
+#
+# Approach B (mic topology): MWW reads `mic_raw` (pre-AEC) while
+# voice_assistant reads `mic_aec` (post-AEC). With sr_low_cost AEC the raw
+# path preserves the spectral features the neural model needs; routing MWW
+# through AEC dropped detection in earlier tests.
+#
+# MWW → VA wiring: the `micro_wake_word:` key inside voice_assistant only
+# syncs the active-wake-words list to HA's UI; it does NOT auto-start VA on
+# detection. on_wake_word_detected below is the real wiring — local MWW
+# detection calls voice_assistant.start (one-shot), which sends a single
+# STT/TTS request to HA and returns to IDLE. We do NOT use
+# voice_assistant.start_continuous: with use_wake_word: false (default) it
+# bypasses wake-word gating and starts STT immediately on every IDLE.
+#
+# MWW has stop_after_detection: true (default) — it stops itself after
+# firing so TTS playback can't re-trigger it through the pre-AEC mic. We
+# restart it from voice_assistant.on_end / on_error.
+#
+# probability_cutoff: 0.60 — raised from 0.38 to reject music false-triggers.
+# sliding_window_size: 6 — model must sustain >60% for 6 frames (~120 ms).
+#   To tune: if wake word misses → lower to 5 or 4; if false-triggers on music
+#   → raise to 7 or 8.
 micro_wake_word:
   id: my_wake_word
+  task_stack_in_psram: false
   microphone:
-    microphone: mic_raw
-    gain_factor: 2
-  stop_after_detection: true
+    microphone: mic_aec
+    gain_factor: "6"
   models:
     - model: hey_jarvis
-      probability_cutoff: 0.35
-      sliding_window_size: 3
+      id: hey_jarvis_model
+      probability_cutoff: 0.60
+      sliding_window_size: 6
   vad:
     model: github://esphome/micro-wake-word-models/models/v2/vad.json
-    probability_cutoff: 0.45
-    sliding_window_size: 5
-
+    probability_cutoff: 0.50
+    sliding_window_size: 6
   on_wake_word_detected:
-    then:
-      # WAKE THE SCREEN AND RESET THE TIMER
-      - light.turn_on: screen_backlight
-      - script.execute: screen_idle_timer
+    - light.turn_on: screen_backlight
+    - script.execute: screen_idle_timer
+    - logger.log:
+        format: "Wake word detected: %s"
+        args: ["wake_word.c_str()"]
+    # Pass the matched wake word through so HA's pipeline gets the phrase.
+    - voice_assistant.start:
+        wake_word: !lambda "return wake_word;"
 
-      - media_player.stop: board_player
-      - voice_assistant.stop
 
-      - logger.log:
-          format: "Wake word detected: %s"
-          args: ["wake_word.c_str()"]
-      - lvgl.animimg.update:
-          id: state_anim
-          src: [listening_01,  listening_03,  listening_05,  listening_07,  listening_09,  listening_11,  listening_13]
-          duration: 2600ms
-          repeat_count: forever
-          auto_start: true
-      - micro_wake_word.stop
-      - delay: 300ms
-      - voice_assistant.start:
-          wake_word: !lambda return wake_word;
+# Global flags
+globals:
+  # 0=idle/clock  1=listening  2=processing  3=replying(TTS)  4=media playing
+  - id: current_anim_state
+    type: int
+    restore_value: false
+    initial_value: '0'
 
+# ---- Voice Assistant ----
+# noise_suppression_level: 4 (max) — WebRTC NS runs at full aggressiveness,
+# cutting background room noise and music spill before audio reaches HA STT.
+# volume_multiplier: 4.0 — additional software pre-amp on top of the 36dB
+# codec gain; gives the most pickup at room distance without distortion.
 voice_assistant:
+  id: va_engine
   microphone:
     microphone: mic_aec
     gain_factor: 10
+  micro_wake_word: my_wake_word
   media_player: board_player
-  noise_suppression_level: 0
+  noise_suppression_level: 4
   auto_gain: 31dBFS
-  volume_multiplier: 2.0
+  volume_multiplier: 4.0
+  # Retain conversation context (conversation ID) for 5 minutes so
+  # follow-up commands share context with the original ("turn on the
+  # kitchen light" → "now dim it to 50%").
+  conversation_timeout: 300s
 
   on_client_connected:
-    - logger.log: "Voice Assistant connected to Home Assistant"
-    - lvgl.label.update:
-            id: boot_label
-            text: "Home Assistant Linked"
-    - delay: 1s
-    - lvgl.label.update:
-        id: boot_label
-        text: "Voice Assistant: Ready"
-    - delay: 1s
-    #Clear the boot screen once everything is confirmed
-    - lvgl.widget.update:
-        id: boot_screen
-        hidden: true
-    - lvgl.widget.update:
-        id: main_screen
-        hidden: false
-    - script.execute: screen_idle_timer
-    - script.execute: restart_wakeword_safely
+    # MWW is what we actually need running for wake-word; ensure it is up
+    # after an HA reconnect. Idempotent if already running.
+    - micro_wake_word.start
 
   on_client_disconnected:
-    - logger.log: "Voice Assistant disconnected from Home Assistant"
-    - micro_wake_word.stop
-    - lvgl.animimg.update:
-        id: state_anim
-        src: [idle_01,  idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
-        duration: 2600ms
-        repeat_count: forever
-        auto_start: true
+    - script.execute:
+        id: set_anim_state
+        target_state: 0
+
+  # NOTE: voice_assistant.on_wake_word_detected fires only when HA performs
+  # server-side wake-word detection (use_wake_word: true). We use local MWW,
+  # so HA never sends VOICE_ASSISTANT_WAKE_WORD_END — wake-word UI side
+  # effects live in micro_wake_word.on_wake_word_detected instead.
 
   on_listening:
-    - logger.log: "Mic is listening"
-    - lvgl.animimg.update:
-        id: state_anim
-        src: [listening_01,  listening_03,  listening_05,  listening_07,  listening_09,  listening_11,  listening_13]
-        duration: 2600ms
-        repeat_count: forever
-        auto_start: true
+    - script.execute:
+        id: set_anim_state
+        target_state: 1
 
   on_stt_end:
     - logger.log:
         format: "STT heard: %s"
         args: ["x.c_str()"]
-    # - script.execute: pipeline_watchdog
-
-    - lvgl.animimg.update:
-          id: state_anim
-          src: [processing_01,  processing_03,  processing_05,  processing_07,  processing_09,  processing_11, processing_13]
-          duration: 2600ms
-          repeat_count: forever
-          auto_start: true
+    - script.execute:
+        id: set_anim_state
+        target_state: 2
 
   on_tts_start:
+    - if:
+        condition:
+          lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
+        then:
+          - media_player.volume_set:
+              id: board_player
+              volume: !lambda "return id(va_volume_slider).state;"
     - logger.log:
         format: "TTS text: %s"
         args: ["x.c_str()"]
-    - micro_wake_word.stop
-    - lvgl.animimg.update:
-        id: state_anim
-        src: [replying_01,  replying_03,  replying_05, replying_07, replying_09,  replying_11,  replying_13]
-        duration: 2600ms
-        repeat_count: forever
-        auto_start: true
+    - script.execute:
+        id: set_anim_state
+        target_state: 3
 
   on_end:
+    - logger.log:
+        format: "VA cycle end — free heap: %u  free PSRAM: %u"
+        args: ["esp_get_free_heap_size()", "heap_caps_get_free_size(MALLOC_CAP_SPIRAM)"]
+        level: INFO
+    - micro_wake_word.start
     - script.execute: screen_idle_timer
-    - lvgl.animimg.update:
-        id: state_anim
-        src: [idle_01,  idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
-        duration: 2600ms
-        repeat_count: forever
-        auto_start: true
-    - delay: 250ms
-    # - script.execute: restart_wakeword_safelymusic_resampler
+    - if:
+        condition:
+          lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
+        then:
+          - media_player.volume_set:
+              id: board_player
+              volume: !lambda "return id(va_volume_slider).state;"
+    - script.execute:
+        id: set_anim_state
+        target_state: 0
 
   on_error:
     - logger.log:
         format: "VA error %d: %s"
         args: ["code", "message.c_str()"]
-    - lvgl.animimg.update:
-        id: state_anim
-        src: [idle_01,  idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
-        duration: 2600ms
-        repeat_count: forever
-        auto_start: true
-    - delay: 250ms
-    # - script.execute: restart_wakeword_safelymusic_resampler
+    - micro_wake_word.start
+    - script.execute:
+        id: set_anim_state
+        target_state: 0
+
 
 script:
-  - id: restart_wakeword_safely
-    mode: restart
+  # --- Clock/weather label refresh ---
+  # Called on boot, every minute via on_time, and whenever state returns to 0.
+  - id: update_clock_display
+    mode: single
     then:
-      - delay: 500ms
+      - lvgl.label.update:
+          id: clock_label
+          text: !lambda |
+            auto t = id(ha_time).now();
+            if (!t.is_valid()) return std::string("--:--");
+            char buf[6];
+            snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.minute);
+            return std::string(buf);
+      - lvgl.label.update:
+          id: date_label
+          text: !lambda |
+            auto t = id(ha_time).now();
+            if (!t.is_valid()) return std::string("");
+            const char* days[]   = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
+            const char* months[] = {"January","February","March","April","May","June","July","August","September","October","November","December"};
+            char buf[40];
+            snprintf(buf, sizeof(buf), "%s, %d %s", days[t.day_of_week - 1], t.day_of_month, months[t.month - 1]);
+            return std::string(buf);
+
+  # --- Weather label refresh ---
+  # Re-reads current sensor states and updates labels. Covers the race where
+  # HA pushes initial state before LVGL widgets are ready (during boot) — the
+  # on_value callback fires but the update is lost. Called from on_boot after
+  # main_screen is revealed, and from the periodic 5-min wake script.
+  - id: refresh_weather_display
+    mode: single
+    then:
+      - lvgl.label.update:
+          id: weather_temp_label
+          text: !lambda |
+            float t = id(ha_temperature).state;
+            if (std::isnan(t)) return std::string("-- °C");
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.0f °C", t);
+            return std::string(buf);
+      - lvgl.label.update:
+          id: weather_icon_label
+          text: !lambda |
+            std::string x = id(ha_weather_condition).state;
+            if (x == "sunny")            return std::string("\U000F0597");
+            if (x == "clear-night")      return std::string("\U000F0594");
+            if (x == "partlycloudy")     return std::string("\U000F0595");
+            if (x == "cloudy")           return std::string("\U000F0590");
+            if (x == "rainy")            return std::string("\U000F0596");
+            if (x == "pouring")          return std::string("\U000F0596");
+            if (x == "snowy")            return std::string("\U000F0598");
+            if (x == "snowy-rainy")      return std::string("\U000F067F");
+            if (x == "fog")              return std::string("\U000F0591");
+            if (x == "hail")             return std::string("\U000F0592");
+            if (x == "lightning")        return std::string("\U000F0593");
+            if (x == "lightning-rainy")  return std::string("\U000F067E");
+            if (x == "windy" || x == "windy-variant") return std::string("\U000F059D");
+            if (x == "thunderstorm")  return std::string("\U000F0593");
+            if (x == "exceptional")   return std::string("\U000F0590");
+            return std::string("\U000F0590");
+
+  # --- Screen state manager ---
+  # State 0: clock/weather idle screen
+  # State 1: listening animation
+  # State 2: processing animation
+  # State 3: replying (TTS) animation
+  # State 4: Now Playing screen
+  - id: set_anim_state
+    mode: restart
+    parameters:
+      target_state: int
+    then:
       - if:
           condition:
-            and:
-              - voice_assistant.connected
-              - media_player.is_idle:
-                  id: board_player
+            lambda: 'return id(current_anim_state) != target_state;'
           then:
-            - logger.log: "Starting wake word (bus should be free)"
-            - micro_wake_word.start
-            - lvgl.animimg.update:
-                id: state_anim
-                src: [idle_01,  idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
-                duration: 2600ms
-                repeat_count: forever
-                auto_start: true
-          else:
-            - logger.log: "Wake word start delayed; media player not idle"
-            - delay: 500ms
-            # - script.execute: restart_wakeword_safelymusic_resampler
+            - globals.set:
+                id: current_anim_state
+                value: !lambda 'return target_state;'
+
+            # State 0: show clock/weather, hide everything else
+            - if:
+                condition:
+                  lambda: 'return target_state == 0;'
+                then:
+                  - lvgl.widget.update:
+                      id: now_playing_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: state_anim
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: clock_weather_screen
+                      hidden: false
+                  - script.execute: update_clock_display
+
+            # States 1-3: show Ivy animation, hide clock and Now Playing
+            - if:
+                condition:
+                  lambda: 'return target_state >= 1 && target_state <= 3;'
+                then:
+                  - lvgl.widget.update:
+                      id: now_playing_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: clock_weather_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: state_anim
+                      hidden: false
+
+            - if:
+                condition:
+                  lambda: 'return target_state == 1;'
+                then:
+                  - lvgl.animimg.update:
+                      id: state_anim
+                      src: [listening_01, listening_03, listening_05, listening_09, listening_13]
+                      duration: 2600ms
+                      repeat_count: forever
+                      auto_start: true
+
+            - if:
+                condition:
+                  lambda: 'return target_state == 2;'
+                then:
+                  - lvgl.animimg.update:
+                      id: state_anim
+                      src: [processing_01, processing_03, processing_05, processing_09, processing_13]
+                      duration: 2600ms
+                      repeat_count: forever
+                      auto_start: true
+
+            - if:
+                condition:
+                  lambda: 'return target_state == 3;'
+                then:
+                  - lvgl.animimg.update:
+                      id: state_anim
+                      src: [replying_01, replying_03, replying_05, replying_09, replying_13]
+                      duration: 2600ms
+                      repeat_count: forever
+                      auto_start: true
+
+            # State 4: hide clock and animation, show Now Playing
+            - if:
+                condition:
+                  lambda: 'return target_state == 4;'
+                then:
+                  - lvgl.widget.update:
+                      id: clock_weather_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: state_anim
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: now_playing_screen
+                      hidden: false
+
   - id: screen_idle_timer
     mode: restart
     then:
@@ -480,33 +771,21 @@ script:
       - light.turn_off: screen_backlight
       - logger.log: "Screen idle timeout reached. Turning off display."
 
-  - id: pipeline_watchdog
-    mode: restart
-    then:
-      # Give Home Assistant 10 seconds to generate and start playing the audio
-      - delay: 10s 
-      
-      - logger.log: "Watchdog triggered! Audio failed to load. Forcing recovery."
-      
-      # 1. Force kill the stuck media player
-      - media_player.stop: board_player
-      
-      # 2. Force Ivy back to her idle face
-      - lvgl.animimg.update:
-          id: state_anim
-          src: [idle_01, idle_03,  idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
-          duration: 2600ms
-          repeat_count: forever
-          auto_start: true
-          
-      # 3. Safely reboot the microphone
-      # - script.execute: restart_wakeword_safelymusic_resampler
 
+# rotation: 180 moved to lvgl: block — uses P4 PPA hardware accelerator (ESPHome 2026.4.0)
 display:
   - platform: mipi_dsi
     id: my_display
     model: WAVESHARE-ESP32-P4-WIFI6-TOUCH-LCD-3.4C
-    rotation: 180
+    # Pepper's ghost hologram (github.com/veebch/pepper): the pyramid face
+    # reflects the source image with a horizontal mirror. Pre-mirror the
+    # source on X so text/images read correctly in the reflection.
+    # Rotation stays in the lvgl: block (uses P4 PPA). If mirror_x ends up
+    # backwards for your setup, try mirror_y: true instead (different
+    # pyramid orientations mirror different axes).
+    transform:
+      mirror_x: true
+      mirror_y: false
 
 output:
   - platform: ledc
@@ -527,157 +806,173 @@ image:
     type: rgb565
     byte_order: little_endian
     transparency: alpha_channel
-    resize: 280x280
+    resize: 240x240
 
   images:
-    #listening
     - file: "Ivy/Assets/listening/listening-1.png"
       id: listening_01
-    # - file: "Ivy/Assets/listening/listening-2.png"
-    #   id: listening_02
     - file: "Ivy/Assets/listening/listening-3.png"
       id: listening_03
-    # - file: "Ivy/Assets/listening/listening-4.png"
-    #   id: listening_04
     - file: "Ivy/Assets/listening/listening-5.png"
       id: listening_05
-    # - file: "Ivy/Assets/listening/listening-6.png"
-    #   id: listening_06
-    - file: "Ivy/Assets/listening/listening-7.png"
-      id: listening_07
-    # - file: "Ivy/Assets/listening/listening-8.png"
-    #   id: listening_08
     - file: "Ivy/Assets/listening/listening-9.png"
       id: listening_09
-    # - file: "Ivy/Assets/listening/listening-10.png"
-    #   id: listening_10
-    - file: "Ivy/Assets/listening/listening-11.png"
-      id: listening_11
-    # - file: "Ivy/Assets/listening/listening-12.png"
-    #   id: listening_12
     - file: "Ivy/Assets/listening/listening-13.png"
       id: listening_13
 
-    #replying
     - file: "Ivy/Assets/replying/replying-1.png"
       id: replying_01
-    # - file: "Ivy/Assets/replying/replying-2.png"
-    #   id: replying_02
     - file: "Ivy/Assets/replying/replying-3.png"
       id: replying_03
-    # - file: "Ivy/Assets/replying/replying-4.png"
-    #   id: replying_04
     - file: "Ivy/Assets/replying/replying-5.png"
       id: replying_05
-    # - file: "Ivy/Assets/replying/replying-6.png"
-    #   id: replying_06
-    - file: "Ivy/Assets/replying/replying-7.png"
-      id: replying_07
-    # - file: "Ivy/Assets/replying/replying-8.png"
-    #   id: replying_08
     - file: "Ivy/Assets/replying/replying-9.png"
       id: replying_09
-    # - file: "Ivy/Assets/replying/replying-10.png"
-    #   id: replying_10
-    - file: "Ivy/Assets/replying/replying-11.png"
-      id: replying_11
-    # - file: "Ivy/Assets/replying/replying-12.png"
-    #   id: replying_12
     - file: "Ivy/Assets/replying/replying-13.png"
       id: replying_13
 
-    #thinking/processing   
     - file: "Ivy/Assets/processing/processing-1.png"
       id: processing_01
-    # - file: "Ivy/Assets/processing/processing-2.png"
-    #   id: processing_02
     - file: "Ivy/Assets/processing/processing-3.png"
       id: processing_03
-    # - file: "Ivy/Assets/processing/processing-4.png"
-    #   id: processing_04
     - file: "Ivy/Assets/processing/processing-5.png"
       id: processing_05
-    # - file: "Ivy/Assets/processing/processing-6.png"
-    #   id: processing_06
-    - file: "Ivy/Assets/processing/processing-7.png"
-      id: processing_07
-    # - file: "Ivy/Assets/processing/processing-8.png"
-    #   id: processing_08
     - file: "Ivy/Assets/processing/processing-9.png"
       id: processing_09
-    # - file: "Ivy/Assets/processing/processing-10.png"
-    #   id: processing_10
-    - file: "Ivy/Assets/processing/processing-11.png"
-      id: processing_11
-    # - file: "Ivy/Assets/processing/processing-12.png"
-    #   id: processing_12
     - file: "Ivy/Assets/processing/processing-13.png"
       id: processing_13
 
-    #idle
-    - file: "Ivy/Assets/idle/idle-1.png"
-      id: idle_01
-    # - file: "Ivy/Assets/idle/idle-2.png"
-    #   id: idle_02
-    - file: "Ivy/Assets/idle/idle-3.png"
-      id: idle_03
-    # - file: "Ivy/Assets/idle/idle-4.png"
-    #   id: idle_04
-    - file: "Ivy/Assets/idle/idle-5.png"
-      id: idle_05
-    # - file: "Ivy/Assets/idle/idle-6.png"
-    #   id: idle_06
-    - file: "Ivy/Assets/idle/idle-7.png"
-      id: idle_07
-    # - file: "Ivy/Assets/idle/idle-8.png"
-    #   id: idle_08
-    - file: "Ivy/Assets/idle/idle-9.png"
-      id: idle_09
-    # - file: "Ivy/Assets/idle/idle-10.png"
-    #   id: idle_10
-    - file: "Ivy/Assets/idle/idle-11.png"
-      id: idle_11
-    # - file: "Ivy/Assets/idle/idle-12.png"
-    #   id: idle_12
-    - file: "Ivy/Assets/idle/idle-13.png"
-      id: idle_13
-
-# REQUIRED for LVGL text in ESPHome
 font:
+  - file: "gfonts://Roboto"
+    id: roboto_72
+    size: 72
   - file: "gfonts://Roboto"
     id: roboto_48
     size: 48
   - file: "gfonts://Roboto"
-    id: roboto_24
-    size: 24
+    id: roboto_36
+    size: 36
+  - file: "gfonts://Roboto"
+    id: roboto_32
+    size: 32
+  # MDI weather icons — codepoints are from MaterialDesignIcons 7.x webfont.
+  # If an icon looks wrong, cross-check at materialdesignicons.com.
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_weather_font
+    size: 96
+    glyphs:
+      - "\U000F0590"  # weather-cloudy
+      - "\U000F0591"  # weather-fog
+      - "\U000F0592"  # weather-hail
+      - "\U000F0593"  # weather-lightning
+      - "\U000F0594"  # weather-night (clear-night)
+      - "\U000F0595"  # weather-partly-cloudy
+      - "\U000F0596"  # weather-rainy / pouring
+      - "\U000F0597"  # weather-sunny
+      - "\U000F0598"  # weather-snowy
+      - "\U000F059D"  # weather-windy
+      - "\U000F067E"  # weather-lightning-rainy
+      - "\U000F067F"  # weather-snowy-rainy
 
 lvgl:
+  rotation: 180
   displays:
     - my_display
-  buffer_size: 2%
+  buffer_size: 10%
   byte_order: little_endian
   bg_color: 0x000000
   widgets:
-    # ---- 1. THE MAIN UI (Hidden at boot) ----
+
+    # ---- 1. MAIN UI (hidden at boot) ----
     - obj:
         id: main_screen
         width: 100%
         height: 100%
         bg_color: 0x000000
         border_width: 0
-        hidden: true # 
+        hidden: true
         widgets:
+
+          # Clock/weather idle screen — visible in state 0
+          - obj:
+              id: clock_weather_screen
+              width: 100%
+              height: 100%
+              bg_color: 0x000000
+              border_width: 0
+              hidden: false
+              widgets:
+                - label:
+                    id: clock_label
+                    text: "--:--"
+                    align: CENTER
+                    y: -100
+                    text_color: 0xFFFFFF
+                    text_font: roboto_72
+                - label:
+                    id: date_label
+                    text: ""
+                    align: CENTER
+                    y: -10
+                    text_color: 0xCCCCCC
+                    text_font: roboto_36
+                - label:
+                    id: weather_icon_label
+                    text: ""
+                    align: CENTER
+                    y: 90
+                    text_color: 0xFFFFFF
+                    text_font: mdi_weather_font
+                - label:
+                    id: weather_temp_label
+                    text: "-- °C"
+                    align: CENTER
+                    y: 200
+                    text_color: 0xFFFFFF
+                    text_font: roboto_48
+
+          # Ivy animation — visible in states 1-3
           - animimg:
               id: state_anim
-              x: 0
-              y: 0
               align: CENTER
-              src: [idle_01, idle_03, idle_05,  idle_07,  idle_09,  idle_11,  idle_13]
+              y: 0
+              src: [listening_01, listening_03, listening_05, listening_09, listening_13]
               duration: 2600ms
               repeat_count: forever
-              auto_start: true
+              auto_start: false
+              hidden: true
 
-    # ---- 2. THE BOOT UI (Visible at boot) ----
+          # Now Playing screen — visible in state 4.
+          # text_sensor always writes to now_playing_title so it is always
+          # current when this screen becomes visible.
+          - obj:
+              id: now_playing_screen
+              width: 100%
+              height: 100%
+              align: CENTER
+              bg_color: 0x000000
+              border_width: 0
+              pad_all: 24
+              hidden: true
+              widgets:
+                - label:
+                    text: "Now Playing"
+                    align: CENTER
+                    y: -50
+                    text_color: 0x888888
+                    text_font: roboto_48
+                - label:
+                    id: now_playing_title
+                    text: ""
+                    width: 85%
+                    align: CENTER
+                    y: 10
+                    text_align: CENTER
+                    text_color: 0xFFFFFF
+                    text_font: roboto_48
+                    long_mode: SCROLL_CIRCULAR
+
+    # ---- 2. BOOT UI (visible at boot) ----
     - obj:
         id: boot_screen
         width: 100%
@@ -690,17 +985,17 @@ lvgl:
               width: 80
               height: 80
               align: CENTER
-              spin_time: 1s       
+              spin_time: 1s
               arc_length: 60deg
           - label:
               id: boot_label
               text: "Initializing Hardware..."
               align: CENTER
-              y: 80 # Pushes the text 80 pixels below the spinner
+              y: 100
               text_color: 0xFFFFFF
-              text_font: roboto_24
+              text_font: roboto_32
 
-#-------------Controls-----------------------------
+# ------------- Controls -------------
 number:
   - platform: template
     name: "Voice Assistant Volume"
@@ -709,74 +1004,37 @@ number:
     max_value: 1.0
     step: 0.05
     optimistic: true
+    restore_value: true
     initial_value: 0.75
     on_value:
       then:
-        - media_player.volume_set:
-            id: board_player
-            volume: !lambda "return x;"
+        - if:
+            condition:
+              lambda: 'return id(board_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING && abs(x - id(board_player).volume) > 0.04;'
+            then:
+              - media_player.volume_set:
+                  id: board_player
+                  volume: !lambda "return x;"
+
+  - platform: template
+    name: "Music Volume"
+    id: music_volume_slider
+    min_value: 0.1
+    max_value: 1.0
+    step: 0.05
+    optimistic: true
+    restore_value: true
+    initial_value: 0.45
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(board_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING && abs(x - id(board_player).volume) > 0.04;'
+            then:
+              - media_player.volume_set:
+                  id: board_player
+                  volume: !lambda "return x;"
 
 button:
   - platform: restart
     name: "Restart AI Screen"
-
-#-------------Debugging-----------------------------
-
-# ---- Buttons in Home Assistant to test mic and speaker ----
-
-# button:
-#   - platform: template
-#     name: "Mic Test (One Shot)"
-#     on_press:
-#       - if:
-#           condition:
-#             voice_assistant.connected:
-#           then:
-#             - micro_wake_word.stop
-#             - delay: 500ms
-#             - voice_assistant.start:
-#                 silence_detection: true
-#           else:
-#             - logger.log: "Voice Assistant not connected to Home Assistant"
-
-#   - platform: template
-#     name: "Mic Test (5s Push-to-Talk)"
-#     on_press:
-#       - if:
-#           condition:
-#             voice_assistant.connected:
-#           then:
-#             - micro_wake_word.stop
-#             - delay: 500ms
-#             - voice_assistant.start:
-#                 silence_detection: false
-#             - delay: 5s
-#             - voice_assistant.stop
-#           else:
-#             - logger.log: "Voice Assistant not connected to Home Assistant"
-
-#   # Speaker test: play a file URL directly
-#   - platform: template
-#     name: "Speaker Test (Play URL)"
-#     on_press:
-#       - media_player.play_media:
-#           id: board_player
-#           media_url: "https://files.freemusicarchive.org/storage-freemusicarchive-org/tracks/xo6mKZ059kA1Pmx2l1taQyzIDxloT1pBN6ePPTfI.mp3"
-  
-  
-  # widgets:
-  #   - obj:
-  #       width: 100%
-  #       height: 100%
-  #       align: CENTER
-  #       bg_color: 0x00FF00
-  #       bg_opa: COVER
-  #       border_width: 0
-  #       pad_all: 0
-  #       radius: 0
-  #       widgets:
-  #         - label:
-  #             text: "LVGL OK"
-  #             align: CENTER
-  #             text_font: roboto_48
-  #             text_color: 0x000000
