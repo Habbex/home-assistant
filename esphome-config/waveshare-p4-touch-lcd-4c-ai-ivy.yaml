@@ -83,10 +83,12 @@ esp32:
           # L2 cache 256 KB — default 128 KB is too small for MIPI DSI +
           # audio + LVGL; cold-start cache misses cause ~1 s audio glitch.
           CONFIG_CACHE_L2_CACHE_256KB: y
-          # Move firmware code and read-only data to PSRAM, freeing
-          # internal SRAM for DMA-capable allocations.
-          CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
-          CONFIG_SPIRAM_RODATA: y
+          # XIP from PSRAM — the P4-correct option for running
+          # instruction/rodata fetches from PSRAM. The old ESP32-S3
+          # options (CONFIG_SPIRAM_FETCH_INSTRUCTIONS / RODATA) are
+          # silently ignored on P4; this is the unified replacement.
+          # Matches the reference waveshare-p4-touch config.
+          CONFIG_SPIRAM_XIP_FROM_PSRAM: "y"
           # TLS buffers in PSRAM — each TTS/media HTTPS session needs ~40 KB
           # for MbedTLS; without this they land in internal SRAM and exhaust
           # it after 2-3 sessions (the "fills up" symptom).
@@ -113,11 +115,9 @@ logger:
     i2s_audio: WARN
     i2s_audio.speaker: WARN
     i2s_audio.microphone: WARN
-    i2s_duplex: WARN
-    i2s_duplex.speaker_volume: WARN
-    i2s_duplex.mic_gain: WARN
-    audio_dac: WARN
-    audio_adc: WARN
+    esp_audio_stack: WARN
+    esp_audio_stack.speaker_volume: WARN
+    esp_audio_stack.mic_gain: WARN
     esp_aec: WARN
     number: WARN
     homeassistant.text_sensor: WARN
@@ -177,6 +177,13 @@ i2c:
   scan: false
   id: internal_i2c
 
+network:
+  # On hosted P4+C6 the bottleneck is INTERNAL|DMA headroom.
+  # Prevent ESPHome from enabling the high_performance preset 
+  # (which it does automatically for media players) to stop
+  # the SDIO driver from asserting on buffer starvation.
+  enable_high_performance: false
+
 switch:
   - platform: gpio
     pin: GPIO53
@@ -196,40 +203,27 @@ switch:
       - logger.log: "Wake word MUTED via Home Assistant"
 
 external_components:
-  # Pinned to v2026.5.0 (May 14, 2026): audio engine rebuild — cleaner I2S
-  # lifecycle, better AEC reference handling. Floating ref: main lets
-  # upstream churn break the device on every flash; bump this tag
-  # deliberately when picking up a new release.
+  # Pinned to v2026.6.2 (June 7, 2026): GMF audio stack migration —
+  # i2s_audio_duplex replaced by esp_audio_stack with embedded codec
+  # config. Better runtime/memory behavior, cleaner I2S lifecycle.
+  # Floating ref: main lets upstream churn break the device on every
+  # flash; bump this tag deliberately when picking up a new release.
   #
-  # esp_aec (not esp_afe) — esp_afe was tried 2026-05-27 and reverted: the
-  # extra ~20 KB internal-RAM footprint + feed/fetch tasks on Core 1
-  # starved the hosted-Wi-Fi SDIO RX task during TTS bursts, asserting in
-  # sdio_drv.c (copy_payload / sdio_rx_get_buffer). esp_aec is synchronous,
-  # no separate tasks, no extra RAM — stable.
+  # esp_aec (not esp_afe) — esp_afe was tried 2026-05-27 and reverted:
+  # the extra ~20 KB internal-RAM footprint + feed/fetch tasks on Core 1
+  # starved the hosted-Wi-Fi SDIO RX task during TTS bursts. esp_aec is
+  # synchronous, no separate tasks, no extra RAM — stable.
+  # TODO: re-evaluate esp_afe on v2026.6.2 (GMF runtime improvements
+  # may have fixed the SDIO starvation issue on the P4).
   - source:
       type: git
       url: https://github.com/n-IA-hane/esphome-intercom
-      ref: v2026.5.0
-    components: [audio_processor, i2s_audio_duplex, esp_aec]
+      ref: v2026.6.2
+    components: [audio_processor, esp_audio_stack, esp_aec, speaker]
 
-audio_dac:
-  - platform: es8311
-    id: es8311_dac
-    i2c_id: internal_i2c
-    address: 0x18
-    bits_per_sample: 16bit
-    sample_rate: 16000
-    use_mclk: true
-    mic_gain: 24dB
-
-audio_adc:
-  - platform: es7210
-    id: es7210_adc
-    i2c_id: internal_i2c
-    address: 0x40
-    bits_per_sample: 16bit
-    sample_rate: 16000
-    mic_gain: 24dB
+# audio_dac / audio_adc blocks removed — codec config is now embedded in
+# esp_audio_stack below (v2026.6.0 migration: standalone codec components
+# are no longer the supported path).
 
 esp_aec:
   id: aec_processor
@@ -242,8 +236,8 @@ esp_aec:
   # with an integrated codec; was 2 which gives only 64 ms coverage).
   filter_length: 4
 
-i2s_audio_duplex:
-  id: i2s_duplex
+esp_audio_stack:
+  id: audio_stack
   i2s_lrclk_pin: GPIO10
   i2s_bclk_pin: GPIO12
   i2s_mclk_pin: GPIO13
@@ -251,41 +245,40 @@ i2s_audio_duplex:
   i2s_dout_pin: GPIO9
   sample_rate: 16000
   output_sample_rate: 16000
-  # processor_id links the AEC to the duplex bus (new API replacing the
-  # older implicit wiring between esp_aec and i2s_audio_duplex).
   processor_id: aec_processor
-  # false: our entire audio path is mono (single-channel codec, mixer,
-  # resampler, speaker). A stereo reference would either zero or duplicate
-  # the second channel for no AEC benefit while doubling the reference
-  # buffer in PSRAM.
-  use_stereo_aec_reference: false
-  # ESP32-P4 is RISC-V; the default dsps_fird_s16 SIMD decimator is
-  # unreliable on this core (esp-dsp issues #117/#102). Use the scalar
-  # float path instead.
-  fir_decimator: custom
   # Move non-DMA audio buffers to PSRAM (~15-20 KB internal RAM freed).
   buffers_in_psram: true
+  audio_task_stack_in_psram: false
+  # Codec config: ES8311 (DAC/speaker) + ES7210 (ADC/mic) on shared I2C.
+  codec:
+    i2c_id: internal_i2c
+    input:
+      type: es7210
+      address: 0x40
+      gain_db: 24.0
+    output:
+      type: es8311
+      address: 0x18
+      use_mclk: true
 
 microphone:
-  - platform: i2s_audio_duplex
-    id: mic_raw
-    i2s_audio_duplex_id: i2s_duplex
-    pre_aec: true
-
-  - platform: i2s_audio_duplex
+  - platform: esp_audio_stack
     id: mic_aec
-    i2s_audio_duplex_id: i2s_duplex
+    esp_audio_stack_id: audio_stack
 
 speaker:
-  - platform: i2s_audio_duplex
+  - platform: esp_audio_stack
     id: hw_speaker
-    i2s_audio_duplex_id: i2s_duplex
+    esp_audio_stack_id: audio_stack
     sample_rate: 16000
+    bits_per_sample: "16"
 
   - platform: mixer
     id: audio_mixer
     output_speaker: hw_speaker
     num_channels: 1
+    bits_per_sample: "16"
+    task_stack_in_psram: false
     # task_stack_in_psram removed 2026-05-27: ESPHome 2026.5.1 bumped
     # ESP-IDF, which now asserts in cache_utils.c when ANY task with a
     # PSRAM stack exists while a flash op runs (NVS writes, OTA, etc.).
@@ -303,6 +296,7 @@ speaker:
     output_speaker: media_speaker_mix
     sample_rate: 16000
     num_channels: 1
+    task_stack_in_psram: false
 
 psram:
   speed: 200MHz
@@ -414,6 +408,7 @@ media_player:
     volume_max: 0.8
     volume_increment: 0.05
     buffer_size: 131072
+    task_stack_in_psram: false
     # task_stack_in_psram removed 2026-05-27 — see audio_mixer comment.
 
     # on_play fires for BOTH music and TTS announcements. The va_speaking guard
@@ -494,9 +489,10 @@ media_player:
 #   → raise to 7 or 8.
 micro_wake_word:
   id: my_wake_word
+  task_stack_in_psram: false
   microphone:
-    microphone: mic_raw
-    gain_factor: 6
+    microphone: mic_aec
+    gain_factor: "6"
   models:
     - model: hey_jarvis
       id: hey_jarvis_model
@@ -554,6 +550,14 @@ globals:
     restore_value: false
     initial_value: 'false'
 
+  # True when the last VA cycle included TTS output. Tells on_end to
+  # re-listen for a follow-up command (continued conversation) instead
+  # of returning to idle. Reset after each follow-up attempt.
+  - id: follow_up_listen
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
 
 # ---- Voice Assistant ----
 # noise_suppression_level: 4 (max) — WebRTC NS runs at full aggressiveness,
@@ -570,6 +574,10 @@ voice_assistant:
   noise_suppression_level: 4
   auto_gain: 31dBFS
   volume_multiplier: 4.0
+  # Retain conversation context (conversation ID) for 5 minutes so
+  # follow-up commands share context with the original ("turn on the
+  # kitchen light" → "now dim it to 50%").
+  conversation_timeout: 300s
 
   on_client_connected:
     # MWW is what we actually need running for wake-word; ensure it is up
@@ -609,6 +617,9 @@ voice_assistant:
     - globals.set:
         id: va_speaking
         value: 'true'
+    - globals.set:
+        id: follow_up_listen
+        value: 'true'
     - if:
         condition:
           lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
@@ -628,43 +639,66 @@ voice_assistant:
         format: "VA cycle end — free heap: %u  free PSRAM: %u"
         args: ["esp_get_free_heap_size()", "heap_caps_get_free_size(MALLOC_CAP_SPIRAM)"]
         level: INFO
-    # MWW has stop_after_detection: true (the default — prevents TTS audio
-    # from re-triggering it via the pre-AEC mic). Restart it here so the
-    # next "Hey Jarvis" can fire.
-    - if:
-        condition:
-          switch.is_on: wake_word_toggle
-        then:
-          - micro_wake_word.start
-    - script.execute: screen_idle_timer
     - globals.set:
         id: va_speaking
         value: 'false'
+    # ── Continued conversation ──────────────────────────────────────
+    # If TTS played (follow_up_listen) AND the user actually spoke
+    # (stt_fired_this_cycle), re-listen for a follow-up command
+    # without requiring the wake word. The HA pipeline retains
+    # conversation context for conversation_timeout (300 s) so the
+    # follow-up round shares the same context.
+    #
+    # Flow: wake → cmd → TTS → re-listen → cmd → TTS → re-listen
+    #       → silence → normal end (MWW restart + idle).
     - if:
         condition:
-          lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
+          lambda: 'return id(follow_up_listen) && id(stt_fired_this_cycle);'
         then:
-          - media_player.volume_set:
-              id: board_player
-              volume: !lambda "return id(va_volume_slider).state;"
-    # If music was playing when wake word fired AND user never spoke,
-    # resume music. Otherwise return to clock screen.
-    - if:
-        condition:
-          lambda: 'return id(was_playing_media) && !id(stt_fired_this_cycle);'
-        then:
-          - logger.log: "No command — resuming paused music"
-          - media_player.play: board_player
+          - logger.log: "Continued conversation — re-listening for follow-up"
+          - globals.set:
+              id: follow_up_listen
+              value: 'false'
+          - delay: 300ms
           - script.execute:
               id: set_anim_state
-              target_state: 4
+              target_state: 1
+          - voice_assistant.start
         else:
-          - script.execute:
-              id: set_anim_state
-              target_state: 0
-    - globals.set:
-        id: was_playing_media
-        value: 'false'
+          # ── Normal end ────────────────────────────────────────────
+          - globals.set:
+              id: follow_up_listen
+              value: 'false'
+          # MWW has stop_after_detection: true (the default — prevents
+          # TTS audio from re-triggering via pre-AEC mic). Restart it
+          # here so the next "Hey Jarvis" can fire.
+          - micro_wake_word.start
+          - script.execute: screen_idle_timer
+          - if:
+              condition:
+                lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
+              then:
+                - media_player.volume_set:
+                    id: board_player
+                    volume: !lambda "return id(va_volume_slider).state;"
+          # If music was playing when wake word fired AND user never
+          # spoke, resume music. Otherwise return to clock screen.
+          - if:
+              condition:
+                lambda: 'return id(was_playing_media) && !id(stt_fired_this_cycle);'
+              then:
+                - logger.log: "No command — resuming paused music"
+                - media_player.play: board_player
+                - script.execute:
+                    id: set_anim_state
+                    target_state: 4
+              else:
+                - script.execute:
+                    id: set_anim_state
+                    target_state: 0
+          - globals.set:
+              id: was_playing_media
+              value: 'false'
 
   on_error:
     - logger.log:
@@ -673,13 +707,12 @@ voice_assistant:
     - globals.set:
         id: va_speaking
         value: 'false'
+    - globals.set:
+        id: follow_up_listen
+        value: 'false'
     # Recover wake-word listening after a failed cycle (otherwise MWW stays
     # stopped from stop_after_detection and the device goes deaf).
-    - if:
-        condition:
-          switch.is_on: wake_word_toggle
-        then:
-          - micro_wake_word.start
+    - micro_wake_word.start
     - script.execute:
         id: set_anim_state
         target_state: 0
