@@ -164,6 +164,7 @@ esp32_hosted:
   d1_pin: GPIO15
   d2_pin: GPIO16
   d3_pin: GPIO17
+  use_psram: true
   # DO NOT set sdio_frequency: 20MHz — tried 2026-05-27, device bricks
   # at boot (black screen, no logs). The C6 slave firmware is compiled
   # expecting 40 MHz and there is no clock negotiation. Stick with the
@@ -419,18 +420,14 @@ media_player:
     on_play:
       - if:
           condition:
-            lambda: 'return !id(va_speaking);'
+            lambda: 'return abs(id(board_player).volume - id(music_volume_slider).state) > 0.04;'
           then:
-            - if:
-                condition:
-                  lambda: 'return abs(id(board_player).volume - id(music_volume_slider).state) > 0.04;'
-                then:
-                  - media_player.volume_set:
-                      id: board_player
-                      volume: !lambda "return id(music_volume_slider).state;"
-            - script.execute:
-                id: set_anim_state
-                target_state: 4
+            - media_player.volume_set:
+                id: board_player
+                volume: !lambda "return id(music_volume_slider).state;"
+      - script.execute:
+          id: set_anim_state
+          target_state: 4
 
     announcement_pipeline:
           speaker: va_speaker_mix
@@ -454,14 +451,9 @@ media_player:
             - media_player.volume_set:
                 id: board_player
                 volume: !lambda "return id(va_volume_slider).state;"
-      - if:
-          condition:
-            lambda: 'return !id(va_speaking);'
-          then:
-            - script.execute:
-                id: set_anim_state
-                target_state: 0
-
+      - script.execute:
+          id: set_anim_state
+          target_state: 0
 
 # ---- Wake Word ----
 # Single model: hey_jarvis.
@@ -508,15 +500,6 @@ micro_wake_word:
     - logger.log:
         format: "Wake word detected: %s"
         args: ["wake_word.c_str()"]
-    - globals.set:
-        id: was_playing_media
-        value: !lambda "return id(board_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;"
-    - if:
-        condition:
-          media_player.is_playing:
-            id: board_player
-        then:
-          - media_player.pause: board_player
     # Pass the matched wake word through so HA's pipeline gets the phrase.
     - voice_assistant.start:
         wake_word: !lambda "return wake_word;"
@@ -524,40 +507,11 @@ micro_wake_word:
 
 # Global flags
 globals:
-  - id: was_playing_media
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-
   # 0=idle/clock  1=listening  2=processing  3=replying(TTS)  4=media playing
   - id: current_anim_state
     type: int
     restore_value: false
     initial_value: '0'
-
-  # True while VA TTS is playing — prevents on_play from switching
-  # to the Now Playing view during a spoken response
-  - id: va_speaking
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-
-  # True if STT actually heard speech this cycle. Used by on_end to
-  # decide whether to resume paused music: silence after wake word →
-  # resume; real command → stay paused (TTS reply or new media stream).
-  - id: stt_fired_this_cycle
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-
-  # True when the last VA cycle included TTS output. Tells on_end to
-  # re-listen for a follow-up command (continued conversation) instead
-  # of returning to idle. Reset after each follow-up attempt.
-  - id: follow_up_listen
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-
 
 # ---- Voice Assistant ----
 # noise_suppression_level: 4 (max) — WebRTC NS runs at full aggressiveness,
@@ -595,17 +549,11 @@ voice_assistant:
   # effects live in micro_wake_word.on_wake_word_detected instead.
 
   on_listening:
-    - globals.set:
-        id: stt_fired_this_cycle
-        value: 'false'
     - script.execute:
         id: set_anim_state
         target_state: 1
 
   on_stt_end:
-    - globals.set:
-        id: stt_fired_this_cycle
-        value: 'true'
     - logger.log:
         format: "STT heard: %s"
         args: ["x.c_str()"]
@@ -614,12 +562,6 @@ voice_assistant:
         target_state: 2
 
   on_tts_start:
-    - globals.set:
-        id: va_speaking
-        value: 'true'
-    - globals.set:
-        id: follow_up_listen
-        value: 'true'
     - if:
         condition:
           lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
@@ -639,79 +581,23 @@ voice_assistant:
         format: "VA cycle end — free heap: %u  free PSRAM: %u"
         args: ["esp_get_free_heap_size()", "heap_caps_get_free_size(MALLOC_CAP_SPIRAM)"]
         level: INFO
-    - globals.set:
-        id: va_speaking
-        value: 'false'
-    # ── Continued conversation ──────────────────────────────────────
-    # If TTS played (follow_up_listen) AND the user actually spoke
-    # (stt_fired_this_cycle), re-listen for a follow-up command
-    # without requiring the wake word. The HA pipeline retains
-    # conversation context for conversation_timeout (300 s) so the
-    # follow-up round shares the same context.
-    #
-    # Flow: wake → cmd → TTS → re-listen → cmd → TTS → re-listen
-    #       → silence → normal end (MWW restart + idle).
+    - micro_wake_word.start
+    - script.execute: screen_idle_timer
     - if:
         condition:
-          lambda: 'return id(follow_up_listen) && id(stt_fired_this_cycle);'
+          lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
         then:
-          - logger.log: "Continued conversation — re-listening for follow-up"
-          - globals.set:
-              id: follow_up_listen
-              value: 'false'
-          - delay: 300ms
-          - script.execute:
-              id: set_anim_state
-              target_state: 1
-          - voice_assistant.start
-        else:
-          # ── Normal end ────────────────────────────────────────────
-          - globals.set:
-              id: follow_up_listen
-              value: 'false'
-          # MWW has stop_after_detection: true (the default — prevents
-          # TTS audio from re-triggering via pre-AEC mic). Restart it
-          # here so the next "Hey Jarvis" can fire.
-          - micro_wake_word.start
-          - script.execute: screen_idle_timer
-          - if:
-              condition:
-                lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
-              then:
-                - media_player.volume_set:
-                    id: board_player
-                    volume: !lambda "return id(va_volume_slider).state;"
-          # If music was playing when wake word fired AND user never
-          # spoke, resume music. Otherwise return to clock screen.
-          - if:
-              condition:
-                lambda: 'return id(was_playing_media) && !id(stt_fired_this_cycle);'
-              then:
-                - logger.log: "No command — resuming paused music"
-                - media_player.play: board_player
-                - script.execute:
-                    id: set_anim_state
-                    target_state: 4
-              else:
-                - script.execute:
-                    id: set_anim_state
-                    target_state: 0
-          - globals.set:
-              id: was_playing_media
-              value: 'false'
+          - media_player.volume_set:
+              id: board_player
+              volume: !lambda "return id(va_volume_slider).state;"
+    - script.execute:
+        id: set_anim_state
+        target_state: 0
 
   on_error:
     - logger.log:
         format: "VA error %d: %s"
         args: ["code", "message.c_str()"]
-    - globals.set:
-        id: va_speaking
-        value: 'false'
-    - globals.set:
-        id: follow_up_listen
-        value: 'false'
-    # Recover wake-word listening after a failed cycle (otherwise MWW stays
-    # stopped from stop_after_detection and the device goes deaf).
     - micro_wake_word.start
     - script.execute:
         id: set_anim_state
