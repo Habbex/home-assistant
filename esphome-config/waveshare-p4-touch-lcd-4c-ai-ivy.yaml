@@ -40,7 +40,7 @@ esphome:
         - lvgl.label.update:
             id: boot_label
             text: "Starting Voice Assistant..."
-        - micro_wake_word.enable_model: hey_jarvis_model
+        - micro_wake_word.enable_model: hey_friday_model
         - micro_wake_word.start
         - delay: 500ms
         - lvgl.label.update:
@@ -150,6 +150,7 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: none
+  fast_connect: true
   ap:
     ssid: "Esp32-P4-Touch-Lcd-4C"
     password: !secret ap_pwd
@@ -280,24 +281,11 @@ speaker:
     num_channels: 1
     bits_per_sample: "16"
     task_stack_in_psram: false
-    # task_stack_in_psram removed 2026-05-27: ESPHome 2026.5.1 bumped
-    # ESP-IDF, which now asserts in cache_utils.c when ANY task with a
-    # PSRAM stack exists while a flash op runs (NVS writes, OTA, etc.).
-    # The assert fires regardless of which task does the flash op, so
-    # all three of our audio tasks (mixer / resampler / media_player)
-    # need their stacks back in internal RAM. Cost: ~16 KB total.
     source_speakers:
       - id: va_speaker_mix
         timeout: 500ms
       - id: media_speaker_mix
         timeout: 500ms
-
-  - platform: resampler
-    id: music_resampler
-    output_speaker: media_speaker_mix
-    sample_rate: 16000
-    num_channels: 1
-    task_stack_in_psram: false
 
 psram:
   speed: 200MHz
@@ -408,23 +396,10 @@ media_player:
     volume_min: 0.2
     volume_max: 0.8
     volume_increment: 0.05
-    buffer_size: 131072
+    buffer_size: 262144
     task_stack_in_psram: false
-    # task_stack_in_psram removed 2026-05-27 — see audio_mixer comment.
 
-    # on_play fires for BOTH music and TTS announcements. The va_speaking guard
-    # skips the music path during TTS. Wake word stays ACTIVE during music:
-    # probability_cutoff 0.60 + sliding_window_size 6 (= 120 ms of sustained
-    # high probability) rejects music false-triggers. The neural model handles
-    # speaker echo on raw audio better than on AEC-processed audio.
     on_play:
-      - if:
-          condition:
-            lambda: 'return abs(id(board_player).volume - id(music_volume_slider).state) > 0.04;'
-          then:
-            - media_player.volume_set:
-                id: board_player
-                volume: !lambda "return id(music_volume_slider).state;"
       - script.execute:
           id: set_anim_state
           target_state: 4
@@ -436,32 +411,22 @@ media_player:
           num_channels: 1
 
     media_pipeline:
-          speaker: music_resampler
-          format: FLAC
+          speaker: media_speaker_mix
+          format: WAV
           sample_rate: 16000
           num_channels: 1
 
     on_idle:
-      # Return to the clock/weather screen immediately so a wake word
-      # during the settle window doesn't find us stuck in state 4.
-      - if:
-          condition:
-            lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
-          then:
-            - media_player.volume_set:
-                id: board_player
-                volume: !lambda "return id(va_volume_slider).state;"
       - script.execute:
           id: set_anim_state
           target_state: 0
 
 # ---- Wake Word ----
-# Single model: hey_jarvis.
+# Single model: hey_friday (custom V2 model from JohnnyPrimus).
 #
-# Approach B (mic topology): MWW reads `mic_raw` (pre-AEC) while
-# voice_assistant reads `mic_aec` (post-AEC). With sr_low_cost AEC the raw
-# path preserves the spectral features the neural model needs; routing MWW
-# through AEC dropped detection in earlier tests.
+# Approach B (mic topology): MWW reads `mic_aec` (post-AEC) while
+# voice_assistant also reads `mic_aec`. With sr_low_cost AEC the spectral
+# features the neural model needs are preserved.
 #
 # MWW → VA wiring: the `micro_wake_word:` key inside voice_assistant only
 # syncs the active-wake-words list to HA's UI; it does NOT auto-start VA on
@@ -475,25 +440,22 @@ media_player:
 # firing so TTS playback can't re-trigger it through the pre-AEC mic. We
 # restart it from voice_assistant.on_end / on_error.
 #
-# probability_cutoff: 0.60 — raised from 0.38 to reject music false-triggers.
-# sliding_window_size: 6 — model must sustain >60% for 6 frames (~120 ms).
-#   To tune: if wake word misses → lower to 5 or 4; if false-triggers on music
-#   → raise to 7 or 8.
+# probability_cutoff: 0.55 — balanced to catch natural speech at room distance
+#   while rejecting TV noise. Lower to 0.50 if still missing wake words,
+#   raise to 0.60 if TV false-triggers return.
+# sliding_window_size: 5 — model must sustain >55% for 5 frames (~100 ms).
+#   Raise to 6 or 7 if false-triggers on music/TV persist.
 micro_wake_word:
   id: my_wake_word
   task_stack_in_psram: false
   microphone:
     microphone: mic_aec
-    gain_factor: "6"
+    gain_factor: "8"
   models:
-    - model: hey_jarvis
-      id: hey_jarvis_model
-      probability_cutoff: 0.60
-      sliding_window_size: 6
-  vad:
-    model: github://esphome/micro-wake-word-models/models/v2/vad.json
-    probability_cutoff: 0.50
-    sliding_window_size: 6
+    - model: https://raw.githubusercontent.com/JohnnyPrimus/Custom_V2_MicroWakeWords/refs/heads/main/models/hey_friday/hey_friday.json
+      id: hey_friday_model
+      probability_cutoff: 0.55
+      sliding_window_size: 5
   on_wake_word_detected:
     - light.turn_on: screen_backlight
     - script.execute: screen_idle_timer
@@ -525,8 +487,8 @@ voice_assistant:
     gain_factor: 10
   micro_wake_word: my_wake_word
   media_player: board_player
-  noise_suppression_level: 4
-  auto_gain: 31dBFS
+  noise_suppression_level: 3
+  auto_gain: 28dBFS
   volume_multiplier: 4.0
   # Retain conversation context (conversation ID) for 5 minutes so
   # follow-up commands share context with the original ("turn on the
@@ -553,56 +515,82 @@ voice_assistant:
         id: set_anim_state
         target_state: 1
 
+  on_stt_vad_end:
+    - script.execute:
+        id: set_anim_state
+        target_state: 2
+
   on_stt_end:
     - logger.log:
         format: "STT heard: %s"
         args: ["x.c_str()"]
+    # Show what was heard and update label to "Building response..."
+    - lvgl.label.update:
+        id: processing_heard_label
+        text: !lambda 'return x.empty() ? std::string("") : std::string("\"" + x + "\"");'
+    - lvgl.label.update:
+        id: processing_label
+        text: "Building response..."
     - script.execute:
         id: set_anim_state
         target_state: 2
 
   on_tts_start:
-    - if:
-        condition:
-          lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
-        then:
-          - media_player.volume_set:
-              id: board_player
-              volume: !lambda "return id(va_volume_slider).state;"
     - logger.log:
         format: "TTS text: %s"
         args: ["x.c_str()"]
+    # Clear processing labels before replying
+    - lvgl.label.update:
+        id: processing_heard_label
+        text: ""
+    - lvgl.label.update:
+        id: processing_label
+        text: "Processing..."
     - script.execute:
         id: set_anim_state
         target_state: 3
+        
+  on_intent_start:
+    then:
+      - script.execute: 
+          id: set_anim_state
+          target_state: 2
+
+  on_intent_progress:
+    then:
+      - script.execute: 
+          id: set_anim_state
+          target_state: 2
 
   on_end:
     - logger.log:
         format: "VA cycle end — free heap: %u  free PSRAM: %u"
         args: ["esp_get_free_heap_size()", "heap_caps_get_free_size(MALLOC_CAP_SPIRAM)"]
         level: INFO
+    - wait_until:
+        condition:
+          lambda: 'return id(board_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;'
+        timeout: 3s
     - micro_wake_word.start
     - script.execute: screen_idle_timer
-    - if:
-        condition:
-          lambda: 'return abs(id(board_player).volume - id(va_volume_slider).state) > 0.04;'
-        then:
-          - media_player.volume_set:
-              id: board_player
-              volume: !lambda "return id(va_volume_slider).state;"
+    - delay: 100ms
     - script.execute:
         id: set_anim_state
         target_state: 0
 
   on_error:
-    - logger.log:
-        format: "VA error %d: %s"
-        args: ["code", "message.c_str()"]
-    - micro_wake_word.start
-    - script.execute:
-        id: set_anim_state
-        target_state: 0
-
+    then:
+      - logger.log:
+          format: 'VA error %d: %s'
+          args:
+            - code
+            - message.c_str()
+      - voice_assistant.stop:
+          id: va_engine
+      - micro_wake_word.start
+      - script.execute:
+          id: set_anim_state
+          target_state: 0
 
 script:
   # --- Clock/weather label refresh ---
@@ -668,9 +656,9 @@ script:
 
   # --- Screen state manager ---
   # State 0: clock/weather idle screen
-  # State 1: listening animation
-  # State 2: processing animation
-  # State 3: replying (TTS) animation
+  # State 1: listening animation (Ivy animimg)
+  # State 2: processing — LVGL spinner + "Processing..." label
+  # State 3: replying (TTS) animation (Ivy animimg)
   # State 4: Now Playing screen
   - id: set_anim_state
     mode: restart
@@ -697,20 +685,33 @@ script:
                       id: state_anim
                       hidden: true
                   - lvgl.widget.update:
+                      id: processing_screen
+                      hidden: true
+                  - lvgl.widget.update:
                       id: clock_weather_screen
                       hidden: false
+                  # Reset processing labels for the next cycle
+                  - lvgl.label.update:
+                      id: processing_label
+                      text: "Processing..."
+                  - lvgl.label.update:
+                      id: processing_heard_label
+                      text: ""
                   - script.execute: update_clock_display
 
-            # States 1-3: show Ivy animation, hide clock and Now Playing
+            # States 1, 3: show Ivy animation, hide clock, Now Playing and processing overlay
             - if:
                 condition:
-                  lambda: 'return target_state >= 1 && target_state <= 3;'
+                  lambda: 'return target_state == 1 || target_state == 3;'
                 then:
                   - lvgl.widget.update:
                       id: now_playing_screen
                       hidden: true
                   - lvgl.widget.update:
                       id: clock_weather_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: processing_screen
                       hidden: true
                   - lvgl.widget.update:
                       id: state_anim
@@ -727,10 +728,23 @@ script:
                       repeat_count: forever
                       auto_start: true
 
+            # State 2: show Ivy processing animation + overlay spinner/label on top
             - if:
                 condition:
                   lambda: 'return target_state == 2;'
                 then:
+                  - lvgl.widget.update:
+                      id: now_playing_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: clock_weather_screen
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: processing_screen
+                      hidden: false
+                  - lvgl.widget.update:
+                      id: state_anim
+                      hidden: false
                   - lvgl.animimg.update:
                       id: state_anim
                       src: [processing_01, processing_03, processing_05, processing_09, processing_13]
@@ -749,7 +763,7 @@ script:
                       repeat_count: forever
                       auto_start: true
 
-            # State 4: hide clock and animation, show Now Playing
+            # State 4: hide clock, animations and processing, show Now Playing
             - if:
                 condition:
                   lambda: 'return target_state == 4;'
@@ -759,6 +773,9 @@ script:
                       hidden: true
                   - lvgl.widget.update:
                       id: state_anim
+                      hidden: true
+                  - lvgl.widget.update:
+                      id: processing_screen
                       hidden: true
                   - lvgl.widget.update:
                       id: now_playing_screen
@@ -931,7 +948,7 @@ lvgl:
                     text_color: 0xFFFFFF
                     text_font: roboto_48
 
-          # Ivy animation — visible in states 1-3
+          # Ivy animation — visible in states 1, 3
           - animimg:
               id: state_anim
               align: CENTER
@@ -941,6 +958,37 @@ lvgl:
               repeat_count: forever
               auto_start: false
               hidden: true
+
+          # Processing overlay — visible in state 2 only.
+          # bg_opa: TRANSP lets the Ivy processing animimg (state_anim) show
+          # through; only the spinner arc and label are drawn on top.
+          - obj:
+              id: processing_screen
+              width: 100%
+              height: 100%
+              bg_opa: TRANSP
+              border_width: 0
+              hidden: true
+              widgets:
+                # Primary status line — cycles through "Processing..." / "Building response..."
+                - label:
+                    id: processing_label
+                    text: "Processing..."
+                    align: BOTTOM_MID
+                    y: -40
+                    text_color: 0xCCCCCC
+                    text_font: roboto_32
+                # Secondary line — shows what Ivy heard (STT transcript)
+                - label:
+                    id: processing_heard_label
+                    text: ""
+                    width: 90%
+                    align: BOTTOM_MID
+                    y: -5
+                    text_align: CENTER
+                    text_color: 0x888888
+                    text_font: roboto_32
+                    long_mode: DOT
 
           # Now Playing screen — visible in state 4.
           # text_sensor always writes to now_playing_title so it is always
@@ -1010,26 +1058,7 @@ number:
       then:
         - if:
             condition:
-              lambda: 'return id(board_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING && abs(x - id(board_player).volume) > 0.04;'
-            then:
-              - media_player.volume_set:
-                  id: board_player
-                  volume: !lambda "return x;"
-
-  - platform: template
-    name: "Music Volume"
-    id: music_volume_slider
-    min_value: 0.1
-    max_value: 1.0
-    step: 0.05
-    optimistic: true
-    restore_value: true
-    initial_value: 0.45
-    on_value:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(board_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING && abs(x - id(board_player).volume) > 0.04;'
+              lambda: 'return abs(x - id(board_player).volume) > 0.04;'
             then:
               - media_player.volume_set:
                   id: board_player
