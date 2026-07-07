@@ -41,7 +41,15 @@ esphome:
             id: boot_label
             text: "Starting Voice Assistant..."
         - micro_wake_word.enable_model: hey_friday_model
-        - micro_wake_word.start
+        - if:
+            condition:
+              lambda: 'return id(wake_word_toggle).state;'
+            then:
+              - micro_wake_word.start
+            else:
+              - lvgl.label.update:
+                  id: mute_icon_label
+                  text: "\U000F036D"
         - delay: 500ms
         - lvgl.label.update:
             id: boot_label
@@ -200,9 +208,15 @@ switch:
     turn_on_action:
       - micro_wake_word.start
       - logger.log: "Wake word ENABLED via Home Assistant"
+      - lvgl.label.update:
+          id: mute_icon_label
+          text: ""
     turn_off_action:
       - micro_wake_word.stop
       - logger.log: "Wake word MUTED via Home Assistant"
+      - lvgl.label.update:
+          id: mute_icon_label
+          text: "\U000F036D"
 
 external_components:
   # Pinned to v2026.6.2 (June 7, 2026): GMF audio stack migration —
@@ -275,17 +289,7 @@ speaker:
     sample_rate: 16000
     bits_per_sample: "16"
 
-  - platform: mixer
-    id: audio_mixer
-    output_speaker: hw_speaker
-    num_channels: 1
-    bits_per_sample: "16"
-    task_stack_in_psram: false
-    source_speakers:
-      - id: va_speaker_mix
-        timeout: 500ms
-      - id: media_speaker_mix
-        timeout: 500ms
+
 
 psram:
   speed: 200MHz
@@ -361,24 +365,7 @@ sensor:
       entity_category: diagnostic
 
 # ---- Track metadata and weather condition from Home Assistant ----
-# Entity ID confirmed from HA device page: media_player.waveshare_p4_touch_lcd_4_ai
-# NOTE: No state guard here — we always update the label text regardless of
-# current screen state. The label widget is hidden when not in state 4 anyway,
-# so there is no visual side effect. The previous guard (current_anim_state == 4)
-# was the bug — the sensor fires BEFORE on_play switches to state 4, so the
-# label was never populated.
 text_sensor:
-  - platform: homeassistant
-    id: ha_media_title
-    entity_id: media_player.waveshare_p4_touch_lcd_4_ai_media_player_2
-    attribute: media_title
-    on_value:
-      then:
-        - lvgl.label.update:
-            id: now_playing_title
-            text: !lambda |
-              return x.empty() ? std::string("Unknown Track") : x;
-
   - platform: homeassistant
     id: ha_weather_condition
     entity_id: weather.forecast_home
@@ -399,27 +386,11 @@ media_player:
     buffer_size: 262144
     task_stack_in_psram: false
 
-    on_play:
-      - script.execute:
-          id: set_anim_state
-          target_state: 4
-
     announcement_pipeline:
-          speaker: va_speaker_mix
+          speaker: hw_speaker
           format: WAV
           sample_rate: 16000
           num_channels: 1
-
-    media_pipeline:
-          speaker: media_speaker_mix
-          format: WAV
-          sample_rate: 16000
-          num_channels: 1
-
-    on_idle:
-      - script.execute:
-          id: set_anim_state
-          target_state: 0
 
 # ---- Wake Word ----
 # Single model: hey_friday (custom V2 model from JohnnyPrimus).
@@ -469,7 +440,7 @@ micro_wake_word:
 
 # Global flags
 globals:
-  # 0=idle/clock  1=listening  2=processing  3=replying(TTS)  4=media playing
+  # 0=idle/clock  1=listening  2=processing  3=replying(TTS)
   - id: current_anim_state
     type: int
     restore_value: false
@@ -487,18 +458,23 @@ voice_assistant:
     gain_factor: 10
   micro_wake_word: my_wake_word
   media_player: board_player
-  noise_suppression_level: 3
-  auto_gain: 28dBFS
+  # Removed WebRTC noise_suppression_level and auto_gain
+  # These consume significant CPU (making VA sluggish) and cause memory
+  # fragmentation over time leading to device crashes/unavailability.
+  # The esp_aec component already provides hardware-level cleaning.
   volume_multiplier: 4.0
-  # Retain conversation context (conversation ID) for 5 minutes so
-  # follow-up commands share context with the original ("turn on the
-  # kitchen light" → "now dim it to 50%").
-  conversation_timeout: 300s
+  # Retain conversation context (conversation ID). Reduced to 60s
+  # to prevent memory starvation from holding context too long.
+  conversation_timeout: 60s
 
   on_client_connected:
     # MWW is what we actually need running for wake-word; ensure it is up
     # after an HA reconnect. Idempotent if already running.
-    - micro_wake_word.start
+    - if:
+        condition:
+          lambda: 'return id(wake_word_toggle).state;'
+        then:
+          - micro_wake_word.start
 
   on_client_disconnected:
     - script.execute:
@@ -571,7 +547,11 @@ voice_assistant:
         condition:
           lambda: 'return id(board_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;'
         timeout: 3s
-    - micro_wake_word.start
+    - if:
+        condition:
+          lambda: 'return id(wake_word_toggle).state;'
+        then:
+          - micro_wake_word.start
     - script.execute: screen_idle_timer
     - delay: 100ms
     - script.execute:
@@ -587,7 +567,11 @@ voice_assistant:
             - message.c_str()
       - voice_assistant.stop:
           id: va_engine
-      - micro_wake_word.start
+      - if:
+          condition:
+            lambda: 'return id(wake_word_toggle).state;'
+          then:
+            - micro_wake_word.start
       - script.execute:
           id: set_anim_state
           target_state: 0
@@ -679,9 +663,6 @@ script:
                   lambda: 'return target_state == 0;'
                 then:
                   - lvgl.widget.update:
-                      id: now_playing_screen
-                      hidden: true
-                  - lvgl.widget.update:
                       id: state_anim
                       hidden: true
                   - lvgl.widget.update:
@@ -704,9 +685,6 @@ script:
                 condition:
                   lambda: 'return target_state == 1 || target_state == 3;'
                 then:
-                  - lvgl.widget.update:
-                      id: now_playing_screen
-                      hidden: true
                   - lvgl.widget.update:
                       id: clock_weather_screen
                       hidden: true
@@ -734,9 +712,6 @@ script:
                   lambda: 'return target_state == 2;'
                 then:
                   - lvgl.widget.update:
-                      id: now_playing_screen
-                      hidden: true
-                  - lvgl.widget.update:
                       id: clock_weather_screen
                       hidden: true
                   - lvgl.widget.update:
@@ -763,23 +738,7 @@ script:
                       repeat_count: forever
                       auto_start: true
 
-            # State 4: hide clock, animations and processing, show Now Playing
-            - if:
-                condition:
-                  lambda: 'return target_state == 4;'
-                then:
-                  - lvgl.widget.update:
-                      id: clock_weather_screen
-                      hidden: true
-                  - lvgl.widget.update:
-                      id: state_anim
-                      hidden: true
-                  - lvgl.widget.update:
-                      id: processing_screen
-                      hidden: true
-                  - lvgl.widget.update:
-                      id: now_playing_screen
-                      hidden: false
+
 
   - id: screen_idle_timer
     mode: restart
@@ -891,6 +850,12 @@ font:
       - "\U000F067E"  # weather-lightning-rainy
       - "\U000F067F"  # weather-snowy-rainy
 
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_icon_font_48
+    size: 48
+    glyphs:
+      - "\U000F036D"  # microphone-off
+
 lvgl:
   rotation: 180
   displays:
@@ -909,6 +874,16 @@ lvgl:
         border_width: 0
         hidden: true
         widgets:
+
+          # Mute Icon Overlay (always visible if set, overlaid on all screens)
+          - label:
+              id: mute_icon_label
+              text: ""
+              align: TOP_RIGHT
+              x: -20
+              y: 20
+              text_color: 0xFF5555  # Red color for mute
+              text_font: mdi_icon_font_48
 
           # Clock/weather idle screen — visible in state 0
           - obj:
@@ -989,36 +964,6 @@ lvgl:
                     text_color: 0x888888
                     text_font: roboto_32
                     long_mode: DOT
-
-          # Now Playing screen — visible in state 4.
-          # text_sensor always writes to now_playing_title so it is always
-          # current when this screen becomes visible.
-          - obj:
-              id: now_playing_screen
-              width: 100%
-              height: 100%
-              align: CENTER
-              bg_color: 0x000000
-              border_width: 0
-              pad_all: 24
-              hidden: true
-              widgets:
-                - label:
-                    text: "Now Playing"
-                    align: CENTER
-                    y: -50
-                    text_color: 0x888888
-                    text_font: roboto_48
-                - label:
-                    id: now_playing_title
-                    text: ""
-                    width: 85%
-                    align: CENTER
-                    y: 10
-                    text_align: CENTER
-                    text_color: 0xFFFFFF
-                    text_font: roboto_48
-                    long_mode: SCROLL_CIRCULAR
 
     # ---- 2. BOOT UI (visible at boot) ----
     - obj:
