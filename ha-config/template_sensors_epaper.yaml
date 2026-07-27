@@ -33,38 +33,7 @@
       state: >
         {{ state_attr('weather.forecast_home', 'wind_speed') | default(0) }}
 
-# ── Trigger-based template sensor for weather forecast ──
-# Runs every 15 minutes and on HA start. Calls weather.get_forecasts
-# and stores the next 3 days as a compact string in an input_text helper.
-- trigger:
-    - trigger: time_pattern
-      minutes: "/15"
-    - trigger: homeassistant
-      event: start
-  action:
-    - delay: "00:00:05"
-    - action: weather.get_forecasts
-      target:
-        entity_id: weather.forecast_home
-      data:
-        type: daily
-      response_variable: forecast_response
-    - action: input_text.set_value
-      target:
-        entity_id: input_text.epaper_weather_forecast_data
-      data:
-        value: >
-          {% set forecasts = forecast_response['weather.forecast_home']['forecast'] %}
-          {% set result = [] %}
-          {% for f in forecasts[:3] %}
-            {% set day = as_timestamp(f.datetime) | timestamp_custom('%a') %}
-            {% set cond = f.condition | default('unknown') %}
-            {% set hi = f.temperature | default(0) | round(0) | string %}
-            {% set lo = f.templow | default(0) | round(0) | string %}
-            {% set result = result + [day ~ '|' ~ cond ~ '|' ~ hi ~ '|' ~ lo] %}
-          {% endfor %}
-          {{ result | join(';') }}
-  sensor:
+    # Weather forecast text line read by ESPHome
     - name: "ePaper Weather Forecast"
       unique_id: epaper_weather_forecast
       state: >

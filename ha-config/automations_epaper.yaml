@@ -26,6 +26,29 @@
         duration:
           days: 7
       response_variable: cal_response
+    - action: weather.get_forecasts
+      target:
+        entity_id: weather.forecast_home
+      data:
+        type: daily
+      response_variable: forecast_response
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.epaper_weather_forecast_data
+      data:
+        value: >
+          {% set data = forecast_response.get('weather.forecast_home', {}) %}
+          {% set forecasts = data.get('forecast', []) %}
+          {% set res = namespace(items=[]) %}
+          {% for f in forecasts[:3] %}
+            {% set dt = (f.datetime | as_datetime) if f.datetime is defined else none %}
+            {% set day = dt.strftime('%a') if dt is not none else 'Day' %}
+            {% set cond = f.condition | default('cloudy') %}
+            {% set hi = (f.temperature | default(0)) | round(0) | string %}
+            {% set lo = (f.templow | default(f.temperature | default(0))) | round(0) | string %}
+            {% set res.items = res.items + [day ~ '|' ~ cond ~ '|' ~ hi ~ '|' ~ lo] %}
+          {% endfor %}
+          {{ res.items | join(';') }}
     # Format events into 8 input_text lines
     - action: input_text.set_value
       target:

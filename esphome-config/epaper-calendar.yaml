@@ -154,10 +154,14 @@ text_sensor:
     id: ha_weather_condition
     entity_id: weather.forecast_home
 
-  # Weather forecast (compact string: "Wed|sunny|25|18;Thu|cloudy|22|15;Fri|rainy|20|14")
+  # Weather forecast (compact string: "Tue|sunny|23|15;Wed|partlycloudy|27|18;Thu|sunny|27|19")
   - platform: homeassistant
     id: ha_weather_forecast
-    entity_id: sensor.epaper_weather_forecast
+    entity_id: input_text.epaper_weather_forecast_data
+    on_value:
+      then:
+        - logger.log: "Weather forecast updated from Home Assistant"
+        - component.update: epaper_display
 
   # Calendar events — 8 lines, each: "TITLE|DATE|TIME|ALLDAY"
   - platform: homeassistant
@@ -186,47 +190,97 @@ text_sensor:
     entity_id: input_text.epaper_calendar_line8
 
 # ── Fonts ──
-# Using Google Fonts for clean rendering on e-paper.
+# Using Google Fonts with full ASCII + Swedish character support (ÅÄÖåäö´).
 font:
   - file: "gfonts://Roboto"
     id: font_title
     size: 48
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto"
     id: font_header
     size: 36
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto"
     id: font_day_header
     size: 28
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto@700"
     id: font_day_header_bold
     size: 28
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto"
     id: font_event
     size: 22
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto"
     id: font_event_small
     size: 18
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto"
     id: font_weather_temp
     size: 72
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto"
     id: font_weather_cond
     size: 28
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto"
     id: font_weather_small
     size: 24
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   - file: "gfonts://Roboto"
     id: font_footer
     size: 20
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
 
   # MDI weather icons
   - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
@@ -263,14 +317,17 @@ font:
       - "\U000F067E"  # weather-lightning-rainy
       - "\U000F067F"  # weather-snowy-rainy
 
-  # Calendar icon
+  # Calendar & Countdown icons
   - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
     id: mdi_calendar
-    size: 36
+    size: 32
     glyphs:
       - "\U000F00ED"  # calendar
       - "\U000F0A21"  # calendar-today
-      - "\U000F0591"  # clock-outline (reusing fog glyph slot for timing)
+      - "\U000F00CC"  # cake / birthday
+      - "\U000F0266"  # gift / birthday
+      - "\U000F0135"  # christmas-tree
+      - "\U000F09BD"  # halloween / pumpkin
 
 # ── Display ──
 # Resolution: 1600×1200 (landscape)
@@ -427,6 +484,23 @@ display:
         it.line(today_cx, ry + 1, today_cx + COL_W, ry + 1, RED);
       }
 
+      // UTF-8 safe string truncation helper for Swedish titles (ÅÄÖåäö)
+      auto truncate_utf8 = [](const std::string &str, size_t max_chars) -> std::string {
+        size_t chars = 0;
+        size_t i = 0;
+        while (i < str.length() && chars < max_chars) {
+          uint8_t c = (uint8_t)str[i];
+          if ((c & 0x80) == 0) i += 1;
+          else if ((c & 0xE0) == 0xC0) i += 2;
+          else if ((c & 0xF0) == 0xE0) i += 3;
+          else if ((c & 0xF8) == 0xF0) i += 4;
+          else i += 1;
+          chars++;
+        }
+        if (i < str.length()) return str.substr(0, i) + "..";
+        return str;
+      };
+
       // ── Render Event Blocks ──
       auto render_event_block = [&](const std::string &line) {
         if (line.empty() || line == "unknown" || line == "unavailable") return;
@@ -472,7 +546,7 @@ display:
         it.filled_rectangle(bx, by, bw, bh, bg_col);
         it.rectangle(bx, by, bw, bh, BLACK);
 
-        std::string short_title = title.length() > 14 ? title.substr(0, 12) + ".." : title;
+        std::string short_title = truncate_utf8(title, 11);
         it.printf(bx + (bw / 2), by + (bh / 2), id(font_event_small), text_col,
                   TextAlign::CENTER, "%s", short_title.c_str());
       };
@@ -544,9 +618,9 @@ display:
       std::string icon = get_weather_icon(cond);
 
       // Large weather icon
-      it.printf(wx + WEATHER_W / 2, wy + 10, id(mdi_large), BLUE,
+      it.printf(wx + WEATHER_W / 2, wy + 5, id(mdi_large), BLUE,
                 TextAlign::TOP_CENTER, "%s", icon.c_str());
-      wy += 100;
+      wy += 85;
 
       // Large temperature
       if (!std::isnan(id(ha_weather_temp).state)) {
@@ -556,40 +630,43 @@ display:
         it.printf(wx + WEATHER_W / 2, wy, id(font_weather_temp), BLACK,
                   TextAlign::TOP_CENTER, "--°C");
       }
-      wy += 85;
+      wy += 75;
 
       // Condition text
       it.printf(wx + WEATHER_W / 2, wy, id(font_weather_cond), GREEN,
                 TextAlign::TOP_CENTER, "%s", pretty_condition(cond).c_str());
-      wy += 40;
+      wy += 34;
 
-      // Humidity & wind
-      if (!std::isnan(id(ha_weather_humidity).state)) {
-        it.printf(wx + WEATHER_W / 2, wy, id(font_weather_small), BLACK,
-                  TextAlign::TOP_CENTER, "Humidity: %.0f%%", id(ha_weather_humidity).state);
-        wy += 30;
+      // Humidity & wind on one line
+      char hw_buf[64] = "";
+      float hum = id(ha_weather_humidity).state;
+      float wind = id(ha_weather_wind).state;
+      if (!std::isnan(hum) && !std::isnan(wind)) {
+        snprintf(hw_buf, sizeof(hw_buf), "Hum: %.0f%%  |  Wind: %.0f km/h", hum, wind);
+      } else if (!std::isnan(hum)) {
+        snprintf(hw_buf, sizeof(hw_buf), "Humidity: %.0f%%", hum);
+      } else if (!std::isnan(wind)) {
+        snprintf(hw_buf, sizeof(hw_buf), "Wind: %.0f km/h", wind);
       }
-      if (!std::isnan(id(ha_weather_wind).state)) {
-        it.printf(wx + WEATHER_W / 2, wy, id(font_weather_small), BLACK,
-                  TextAlign::TOP_CENTER, "Wind: %.0f km/h", id(ha_weather_wind).state);
-        wy += 30;
+      if (strlen(hw_buf) > 0) {
+        it.printf(wx + WEATHER_W / 2, wy, id(font_footer), BLACK,
+                  TextAlign::TOP_CENTER, "%s", hw_buf);
+        wy += 26;
       }
 
-      wy += 20;
-
+      wy += 8;
       // Divider
-      it.line(wx + 20, wy, wx + WEATHER_W - 20, wy, RED);
+      it.line(wx + 20, wy, wx + WEATHER_W - 20, wy, Color(200, 200, 200));
       wy += 15;
 
       // ── Forecast: next 2 days (small panels side by side) ──
       it.printf(wx + WEATHER_W / 2, wy, id(font_day_header_bold), BLACK,
                 TextAlign::TOP_CENTER, "Forecast");
-      wy += 40;
+      wy += 36;  // Pushed down so box doesn't intersect header!
 
       // Parse forecast string: "Wed|sunny|25|18;Thu|cloudy|22|15;Fri|rainy|20|14"
       std::string forecast_str = id(ha_weather_forecast).state;
       if (!forecast_str.empty() && forecast_str != "unknown" && forecast_str != "unavailable") {
-        // Split by semicolon
         int panel_w = (WEATHER_W - 30) / 2;
         int panel_idx = 0;
 
@@ -615,50 +692,134 @@ display:
             }
           }
 
-          // Skip the first entry (today) — show days 2 and 3
+          // Skip first entry if start == 0
           if (panel_idx == 0 && start == 0) {
-            // This is today's forecast — skip it (we already show current)
             start = end + 1;
-            // But re-parse next segment as panel 0
             continue;
           }
 
-          // Panel position
           int px = wx + 10 + (panel_idx * (panel_w + 10));
           int py = wy;
 
           // Panel background
-          it.filled_rectangle(px, py, panel_w, 180, Color(240, 240, 240));
-          it.rectangle(px, py, panel_w, 180, BLACK);
+          it.filled_rectangle(px, py, panel_w, 145, Color(245, 245, 245));
+          it.rectangle(px, py, panel_w, 145, BLACK);
 
           // Day name header
-          Color day_bg = (panel_idx == 0) ? BLUE : BLUE;
-          it.filled_rectangle(px + 1, py + 1, panel_w - 2, 36, day_bg);
-          it.printf(px + panel_w / 2, py + 18, id(font_day_header_bold), WHITE,
+          it.filled_rectangle(px + 1, py + 1, panel_w - 2, 30, BLUE);
+          it.printf(px + panel_w / 2, py + 15, id(font_day_header_bold), WHITE,
                     TextAlign::CENTER, "%s", f_day.c_str());
 
           // Weather icon
           std::string f_icon = get_weather_icon(f_cond);
-          it.printf(px + panel_w / 2, py + 50, id(mdi_small), BLUE,
+          it.printf(px + panel_w / 2, py + 38, id(mdi_small), BLUE,
                     TextAlign::TOP_CENTER, "%s", f_icon.c_str());
 
           // Hi / Lo temps
-          it.printf(px + panel_w / 2, py + 110, id(font_weather_small), RED,
-                    TextAlign::TOP_CENTER, "%s°", f_hi.c_str());
-          it.printf(px + panel_w / 2, py + 140, id(font_weather_small), BLUE,
-                    TextAlign::TOP_CENTER, "%s°", f_lo.c_str());
+          it.printf(px + panel_w / 2, py + 92, id(font_weather_small), RED,
+                    TextAlign::TOP_CENTER, "%s°  %s°", f_hi.c_str(), f_lo.c_str());
 
           // Condition label
-          it.printf(px + panel_w / 2, py + 165, id(font_event_small), BLACK,
+          it.printf(px + panel_w / 2, py + 120, id(font_footer), BLACK,
                     TextAlign::TOP_CENTER, "%s",
                     pretty_condition(f_cond).substr(0, 10).c_str());
 
           panel_idx++;
           start = end + 1;
         }
+        wy += 155;
       } else {
-        it.printf(wx + WEATHER_W / 2, wy + 40, id(font_weather_small), BLACK,
+        it.printf(wx + WEATHER_W / 2, wy + 20, id(font_weather_small), BLACK,
                   TextAlign::TOP_CENTER, "Forecast unavailable");
+        wy += 50;
+      }
+
+      wy += 10;
+      // Divider
+      it.line(wx + 20, wy, wx + WEATHER_W - 20, wy, RED);
+      wy += 15;
+
+      // ── COUNTDOWN SECTION — Important Days ──
+      it.printf(wx + WEATHER_W / 2, wy, id(font_day_header_bold), BLACK,
+                TextAlign::TOP_CENTER, "Countdowns");
+      wy += 36;
+
+      // Helper: calculate days remaining until target month/day
+      auto days_until = [](const ESPTime &now_time, int target_m, int target_d) -> int {
+        if (!now_time.is_valid()) return 0;
+        int cur_y = now_time.year;
+
+        struct tm target_tm = {};
+        target_tm.tm_year = cur_y - 1900;
+        target_tm.tm_mon  = target_m - 1;
+        target_tm.tm_mday = target_d;
+        target_tm.tm_hour = 0;
+        target_tm.tm_min  = 0;
+        target_tm.tm_sec  = 0;
+
+        time_t t_target = mktime(&target_tm);
+        time_t t_now = now_time.timestamp;
+
+        if (t_target < t_now - 86400) {
+          target_tm.tm_year += 1;
+          t_target = mktime(&target_tm);
+        }
+
+        double diff = difftime(t_target, t_now);
+        int days = (int)ceil(diff / 86400.0);
+        return days < 0 ? 0 : days;
+      };
+
+      struct CountdownItem {
+        const char* title;
+        int month;
+        int day;
+        const char* icon;
+        Color col;
+      };
+
+      CountdownItem items[] = {
+        {"Amelie's Bday", 12, 29, "\U000F00CC", RED},     // Cake
+        {"My Birthday",   7,  23, "\U000F0266", BLUE},    // Gift
+        {"Halloween",     10, 31, "\U000F09BD", YELLOW},  // Pumpkin
+        {"Christmas",     12, 24, "\U000F0135", GREEN}    // Tree
+      };
+
+      for (int i = 0; i < 4; i++) {
+        int days_left = days_until(now, items[i].month, items[i].day);
+
+        int card_x = wx + 10;
+        int card_w = WEATHER_W - 20;
+        int card_h = 42;
+        int card_y = wy + (i * 48);
+
+        // Container box
+        it.filled_rectangle(card_x, card_y, card_w, card_h, Color(248, 248, 248));
+        it.rectangle(card_x, card_y, card_w, card_h, BLACK);
+
+        // Left accent bar
+        it.filled_rectangle(card_x + 1, card_y + 1, 6, card_h - 2, items[i].col);
+
+        // MDI Icon
+        it.printf(card_x + 18, card_y + 5, id(mdi_calendar), items[i].col,
+                  TextAlign::TOP_LEFT, "%s", items[i].icon);
+
+        // Event Title
+        it.printf(card_x + 55, card_y + (card_h / 2), id(font_event_small), BLACK,
+                  TextAlign::CENTER_LEFT, "%s", items[i].title);
+
+        // Days Remaining Badge
+        char badge_buf[32];
+        if (days_left == 0) {
+          snprintf(badge_buf, sizeof(badge_buf), "TODAY!");
+        } else if (days_left == 1) {
+          snprintf(badge_buf, sizeof(badge_buf), "1 day");
+        } else {
+          snprintf(badge_buf, sizeof(badge_buf), "%d days", days_left);
+        }
+
+        it.printf(card_x + card_w - 12, card_y + (card_h / 2), id(font_day_header_bold),
+                  items[i].col, TextAlign::CENTER_RIGHT, "%s", badge_buf);
       }
 
       // ════════════════════════════════════════════════════════════════════
