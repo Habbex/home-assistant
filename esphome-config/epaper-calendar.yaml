@@ -353,128 +353,136 @@ display:
       }
 
       // ════════════════════════════════════════════════════════════════════
-      //  CALENDAR SECTION — Left side
+      //  7-DAY MON-SUN HOURLY TIMETABLE GRID (Left Side)
       // ════════════════════════════════════════════════════════════════════
-      int cal_x = MARGIN;
-      int cal_y = CONTENT_TOP;
+      const int TIME_AXIS_W = 60;
+      const int GRID_X = MARGIN + TIME_AXIS_W;
+      const int GRID_W = W - WEATHER_W - TIME_AXIS_W - (MARGIN * 3); // ~1140px width
+      const int COL_W  = GRID_W / 7; // ~162px per day column
 
-      // Section title
-      it.printf(cal_x, cal_y, id(font_title), BLACK,
-                TextAlign::TOP_LEFT, "Upcoming Events");
-      cal_y += 58;
+      const int HEADER_Y = CONTENT_TOP;
+      const int HEADER_HEIGHT = 40;
+      const int GRID_Y = HEADER_Y + HEADER_HEIGHT + 10;
+      const int GRID_H = H - GRID_Y - FOOTER_H - MARGIN - 10; // ~1020px height
 
-      // Divider line
-      it.line(cal_x, cal_y, cal_x + CAL_W, cal_y, RED);
-      it.line(cal_x, cal_y + 1, cal_x + CAL_W, cal_y + 1, RED);
-      cal_y += 12;
+      const char* day_names[] = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"};
 
-      // ── Helper: parse and render a calendar line ──
-      // Format: "TITLE|DATE|TIME|ALLDAY"
-      // Returns the Y position after rendering
-      auto render_event = [&](int x, int y, int max_w, const std::string &line) -> int {
-        if (line.empty()) return y;
+      // Calculate today index (0=Mon, 1=Tue, ..., 6=Sun)
+      int today_idx = -1;
+      if (now.is_valid()) {
+        // ESPHome now.day_of_week: 1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri, 7=Sat
+        today_idx = (now.day_of_week + 5) % 7;
+      }
 
-        // Parse pipe-delimited fields
-        std::string title, date_str, time_str, allday_str;
-        size_t p1 = line.find('|');
-        if (p1 == std::string::npos) {
-          title = line;
+      // ── Draw Day Column Headers (MON - SUN) ──
+      for (int d = 0; d < 7; d++) {
+        int cx = GRID_X + (d * COL_W);
+        bool is_today = (d == today_idx);
+
+        // Column header box
+        Color header_bg = is_today ? YELLOW : Color(240, 240, 240);
+        Color header_fg = is_today ? RED : BLACK;
+
+        it.filled_rectangle(cx + 1, HEADER_Y, COL_W - 2, HEADER_HEIGHT, header_bg);
+        it.rectangle(cx, HEADER_Y, COL_W, HEADER_HEIGHT, BLACK);
+
+        it.printf(cx + (COL_W / 2), HEADER_Y + (HEADER_HEIGHT / 2), id(font_day_header_bold),
+                  header_fg, TextAlign::CENTER, "%s", day_names[d]);
+
+        // Draw vertical grid line for column
+        it.line(cx, GRID_Y, cx, GRID_Y + GRID_H, BLACK);
+      }
+      // Right edge of grid
+      it.line(GRID_X + GRID_W, GRID_Y, GRID_X + GRID_W, GRID_Y + GRID_H, BLACK);
+
+      // ── Draw Hourly Time Axis (00:00 to 24:00) ──
+      int hour_steps[] = {0, 3, 6, 9, 12, 15, 18, 21, 24};
+      for (int h : hour_steps) {
+        int hy = GRID_Y + (int)(((float)h / 24.0f) * GRID_H);
+
+        // Time label on left
+        char h_buf[8];
+        snprintf(h_buf, sizeof(h_buf), "%02d:00", h);
+        it.printf(GRID_X - 6, hy, id(font_footer), BLACK,
+                  TextAlign::CENTER_RIGHT, "%s", h_buf);
+
+        // Horizontal grid line across days
+        if (h == 0 || h == 24) {
+          it.line(GRID_X, hy, GRID_X + GRID_W, hy, BLACK);
         } else {
-          title = line.substr(0, p1);
-          size_t p2 = line.find('|', p1 + 1);
-          if (p2 != std::string::npos) {
-            date_str = line.substr(p1 + 1, p2 - p1 - 1);
-            size_t p3 = line.find('|', p2 + 1);
-            if (p3 != std::string::npos) {
-              time_str = line.substr(p2 + 1, p3 - p2 - 1);
-              allday_str = line.substr(p3 + 1);
-            } else {
-              time_str = line.substr(p2 + 1);
-            }
-          } else {
-            date_str = line.substr(p1 + 1);
+          for (int x = GRID_X; x < GRID_X + GRID_W; x += 6) {
+            it.draw_pixel_at(x, hy, BLACK);
           }
         }
+      }
 
+      // ── Current Time Red Indicator Line ──
+      if (now.is_valid() && today_idx >= 0 && today_idx < 7) {
+        float now_hour = now.hour + (now.minute / 60.0f);
+        int ry = GRID_Y + (int)((now_hour / 24.0f) * GRID_H);
+        int today_cx = GRID_X + (today_idx * COL_W);
+
+        it.line(today_cx, ry - 1, today_cx + COL_W, ry - 1, RED);
+        it.line(today_cx, ry,     today_cx + COL_W, ry,     RED);
+        it.line(today_cx, ry + 1, today_cx + COL_W, ry + 1, RED);
+      }
+
+      // ── Render Event Blocks ──
+      auto render_event_block = [&](const std::string &line) {
+        if (line.empty() || line == "unknown" || line == "unavailable") return;
+
+        std::string title, day_str, sh_str, eh_str, allday_str;
+        size_t p1 = line.find('|');
+        if (p1 == std::string::npos) return;
+        title = line.substr(0, p1);
+
+        size_t p2 = line.find('|', p1 + 1);
+        if (p2 == std::string::npos) return;
+        day_str = line.substr(p1 + 1, p2 - p1 - 1);
+
+        size_t p3 = line.find('|', p2 + 1);
+        if (p3 == std::string::npos) return;
+        sh_str = line.substr(p2 + 1, p3 - p2 - 1);
+
+        size_t p4 = line.find('|', p3 + 1);
+        if (p4 == std::string::npos) {
+          eh_str = line.substr(p3 + 1);
+        } else {
+          eh_str = line.substr(p3 + 1, p4 - p3 - 1);
+          allday_str = line.substr(p4 + 1);
+        }
+
+        int day_idx = atoi(day_str.c_str());
+        float start_h = atof(sh_str.c_str());
+        float end_h = atof(eh_str.c_str());
         bool is_allday = (allday_str == "1");
 
-        // Check if this event is today
-        bool is_today = false;
-        if (id(ha_time).now().is_valid() && date_str.length() >= 10) {
-          char today_buf[12];
-          auto t = id(ha_time).now();
-          snprintf(today_buf, sizeof(today_buf), "%04d-%02d-%02d",
-                   t.year, t.month, t.day_of_month);
-          is_today = (date_str.substr(0, 10) == std::string(today_buf));
-        }
+        if (day_idx < 0 || day_idx >= 7) return;
 
-        // Background highlight for today's events
-        if (is_today) {
-          it.filled_rectangle(x - 4, y - 2, max_w + 8, 56, YELLOW);
-        }
+        int bx = GRID_X + (day_idx * COL_W) + 2;
+        int bw = COL_W - 4;
 
-        // Date label (short format from date string: extract day)
-        // Parse the date to get a nice short form
-        std::string short_date = date_str;
-        if (date_str.length() >= 10) {
-          // Extract month-day: "2026-07-09" -> "Jul 09"
-          int month_num = 0, day_num = 0;
-          sscanf(date_str.c_str(), "%*d-%d-%d", &month_num, &day_num);
-          const char* mon_names[] = {"","Jan","Feb","Mar","Apr","May","Jun",
-                                     "Jul","Aug","Sep","Oct","Nov","Dec"};
-          if (month_num >= 1 && month_num <= 12) {
-            char sd[12];
-            snprintf(sd, sizeof(sd), "%s %d", mon_names[month_num], day_num);
-            short_date = sd;
-          }
-        }
+        int by = GRID_Y + (int)((start_h / 24.0f) * GRID_H);
+        int bh = (int)(((end_h - start_h) / 24.0f) * GRID_H);
+        if (bh < 30) bh = 30;
 
-        // Render: date + time on one line, title on the next
-        Color date_color = is_today ? RED : BLUE;
-        Color title_color = is_today ? BLACK : BLACK;
+        Color bg_col = is_allday ? GREEN : BLUE;
+        Color text_col = WHITE;
 
-        if (is_allday) {
-          it.printf(x, y + 2, id(font_event_small), date_color,
-                    TextAlign::TOP_LEFT, "%s  ALL DAY", short_date.c_str());
-        } else if (!time_str.empty()) {
-          it.printf(x, y + 2, id(font_event_small), date_color,
-                    TextAlign::TOP_LEFT, "%s  %s", short_date.c_str(), time_str.c_str());
-        } else {
-          it.printf(x, y + 2, id(font_event_small), date_color,
-                    TextAlign::TOP_LEFT, "%s", short_date.c_str());
-        }
+        it.filled_rectangle(bx, by, bw, bh, bg_col);
+        it.rectangle(bx, by, bw, bh, BLACK);
 
-        // Event title (truncated to fit)
-        it.printf(x + 10, y + 26, id(font_event), title_color,
-                  TextAlign::TOP_LEFT, "%s", title.c_str());
-
-        // Separator line
-        y += 54;
-        it.line(x, y, x + max_w, y, Color(200, 200, 200));
-        y += 6;
-
-        return y;
+        std::string short_title = title.length() > 14 ? title.substr(0, 12) + ".." : title;
+        it.printf(bx + (bw / 2), by + (bh / 2), id(font_event_small), text_col,
+                  TextAlign::CENTER, "%s", short_title.c_str());
       };
 
-      // Render each calendar event
       esphome::text_sensor::TextSensor* cal_sensors[] = {
         id(cal_line1), id(cal_line2), id(cal_line3), id(cal_line4),
         id(cal_line5), id(cal_line6), id(cal_line7), id(cal_line8)
       };
       for (int i = 0; i < 8; i++) {
-        if (cal_y > H - FOOTER_H - MARGIN - 60) break;  // Don't overflow
-        std::string val = cal_sensors[i]->state;
-        if (!val.empty() && val != "unknown" && val != "unavailable") {
-          cal_y = render_event(cal_x + 10, cal_y, CAL_W - 20, val);
-        }
-      }
-
-      // If no events, show a message
-      if (id(cal_line1).state.empty() ||
-          id(cal_line1).state == "unknown" ||
-          id(cal_line1).state == "unavailable") {
-        it.printf(cal_x + CAL_W / 2, cal_y + 40, id(font_weather_cond), GREEN,
-                  TextAlign::TOP_CENTER, "No upcoming events");
+        render_event_block(cal_sensors[i]->state);
       }
 
       // ════════════════════════════════════════════════════════════════════

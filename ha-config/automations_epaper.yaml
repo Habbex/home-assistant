@@ -1,20 +1,16 @@
 # ──────────────────────────────────────────────────────────────────────
-# ePaper Calendar + Weather — Calendar Event Fetching Automation
+# ePaper Calendar + Weather — 7-Day Timetable Grid Event Fetcher
 #
-# Runs every 15 minutes to fetch upcoming calendar events for the
-# next 7 days and store them in input_text helpers that the ESPHome
-# ePaper device can read via text_sensor.
+# Runs every 15 minutes to fetch upcoming Google Calendar events for
+# the week and formats up to 8 events into structured strings:
+#   TITLE|DAY_INDEX|START_HOUR|END_HOUR|ALLDAY
 #
-# ╔═══════════════════════════════════════════════════════════════════╗
-# ║  CHANGE THIS: Replace calendar.familj below       ║
-# ║  with your actual Google Calendar entity ID from HA.             ║
-# ║  Find it: Settings → Devices & Services → Google Calendar        ║
-# ║  Example: calendar.your_email_gmail_com                          ║
-# ╚═══════════════════════════════════════════════════════════════════╝
+#   DAY_INDEX: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
+#   START_HOUR / END_HOUR: Decimal hours (e.g. 9.5 = 09:30, 0.0-24.0)
 # ──────────────────────────────────────────────────────────────────────
 - id: epaper_fetch_calendar_events
   alias: "ePaper - Fetch Calendar Events"
-  description: "Periodically fetches Google Calendar events and formats them for the ePaper display"
+  description: "Periodically fetches Google Calendar events for the 7-day timetable view"
   mode: single
   triggers:
     - trigger: time_pattern
@@ -22,22 +18,15 @@
     - trigger: homeassistant
       event: start
   actions:
-    - delay: "00:00:10"  # Wait for integrations to be ready on HA start
+    - delay: "00:00:05"  # Wait for integrations to be ready
     - action: calendar.get_events
       target:
-        # ┌──────────────────────────────────────────────────────────┐
-        # │  ⚠️  CHANGE THIS to your Google Calendar entity ID!     │
-        # │  e.g. calendar.your_email_gmail_com                     │
-        # └──────────────────────────────────────────────────────────┘
         entity_id: calendar.familj
       data:
         duration:
           days: 7
       response_variable: cal_response
-    # Format events into 8 lines (up to 8 events), each line:
-    #   TITLE|START_DATE|START_TIME|ALL_DAY
-    # e.g.: "Team Standup|2026-07-09|09:00|0"
-    #        "Birthday Party|2026-07-10||1"    (all-day, no time)
+    # Format events into 8 input_text lines
     - action: input_text.set_value
       target:
         entity_id: input_text.epaper_calendar_line1
@@ -46,11 +35,15 @@
           {% set events = cal_response['calendar.familj']['events'] %}
           {% if events | length > 0 %}
             {% set e = events[0] %}
-            {% set allday = '1' if e.start is string and 'T' not in e.start else '0' %}
-            {% if allday == '1' %}
-              {{ e.summary[:40] }}|{{ e.start }}||1
+            {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
+            {% if is_allday == '1' %}
+              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
             {% else %}
-              {{ e.summary[:40] }}|{{ as_timestamp(e.start) | timestamp_custom('%Y-%m-%d') }}|{{ as_timestamp(e.start) | timestamp_custom('%H:%M') }}|0
+              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -61,11 +54,15 @@
           {% set events = cal_response['calendar.familj']['events'] %}
           {% if events | length > 1 %}
             {% set e = events[1] %}
-            {% set allday = '1' if e.start is string and 'T' not in e.start else '0' %}
-            {% if allday == '1' %}
-              {{ e.summary[:40] }}|{{ e.start }}||1
+            {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
+            {% if is_allday == '1' %}
+              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
             {% else %}
-              {{ e.summary[:40] }}|{{ as_timestamp(e.start) | timestamp_custom('%Y-%m-%d') }}|{{ as_timestamp(e.start) | timestamp_custom('%H:%M') }}|0
+              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -76,11 +73,15 @@
           {% set events = cal_response['calendar.familj']['events'] %}
           {% if events | length > 2 %}
             {% set e = events[2] %}
-            {% set allday = '1' if e.start is string and 'T' not in e.start else '0' %}
-            {% if allday == '1' %}
-              {{ e.summary[:40] }}|{{ e.start }}||1
+            {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
+            {% if is_allday == '1' %}
+              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
             {% else %}
-              {{ e.summary[:40] }}|{{ as_timestamp(e.start) | timestamp_custom('%Y-%m-%d') }}|{{ as_timestamp(e.start) | timestamp_custom('%H:%M') }}|0
+              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -91,11 +92,15 @@
           {% set events = cal_response['calendar.familj']['events'] %}
           {% if events | length > 3 %}
             {% set e = events[3] %}
-            {% set allday = '1' if e.start is string and 'T' not in e.start else '0' %}
-            {% if allday == '1' %}
-              {{ e.summary[:40] }}|{{ e.start }}||1
+            {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
+            {% if is_allday == '1' %}
+              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
             {% else %}
-              {{ e.summary[:40] }}|{{ as_timestamp(e.start) | timestamp_custom('%Y-%m-%d') }}|{{ as_timestamp(e.start) | timestamp_custom('%H:%M') }}|0
+              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -106,11 +111,15 @@
           {% set events = cal_response['calendar.familj']['events'] %}
           {% if events | length > 4 %}
             {% set e = events[4] %}
-            {% set allday = '1' if e.start is string and 'T' not in e.start else '0' %}
-            {% if allday == '1' %}
-              {{ e.summary[:40] }}|{{ e.start }}||1
+            {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
+            {% if is_allday == '1' %}
+              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
             {% else %}
-              {{ e.summary[:40] }}|{{ as_timestamp(e.start) | timestamp_custom('%Y-%m-%d') }}|{{ as_timestamp(e.start) | timestamp_custom('%H:%M') }}|0
+              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -121,11 +130,15 @@
           {% set events = cal_response['calendar.familj']['events'] %}
           {% if events | length > 5 %}
             {% set e = events[5] %}
-            {% set allday = '1' if e.start is string and 'T' not in e.start else '0' %}
-            {% if allday == '1' %}
-              {{ e.summary[:40] }}|{{ e.start }}||1
+            {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
+            {% if is_allday == '1' %}
+              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
             {% else %}
-              {{ e.summary[:40] }}|{{ as_timestamp(e.start) | timestamp_custom('%Y-%m-%d') }}|{{ as_timestamp(e.start) | timestamp_custom('%H:%M') }}|0
+              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -136,11 +149,15 @@
           {% set events = cal_response['calendar.familj']['events'] %}
           {% if events | length > 6 %}
             {% set e = events[6] %}
-            {% set allday = '1' if e.start is string and 'T' not in e.start else '0' %}
-            {% if allday == '1' %}
-              {{ e.summary[:40] }}|{{ e.start }}||1
+            {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
+            {% if is_allday == '1' %}
+              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
             {% else %}
-              {{ e.summary[:40] }}|{{ as_timestamp(e.start) | timestamp_custom('%Y-%m-%d') }}|{{ as_timestamp(e.start) | timestamp_custom('%H:%M') }}|0
+              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -151,10 +168,14 @@
           {% set events = cal_response['calendar.familj']['events'] %}
           {% if events | length > 7 %}
             {% set e = events[7] %}
-            {% set allday = '1' if e.start is string and 'T' not in e.start else '0' %}
-            {% if allday == '1' %}
-              {{ e.summary[:40] }}|{{ e.start }}||1
+            {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
+            {% if is_allday == '1' %}
+              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
             {% else %}
-              {{ e.summary[:40] }}|{{ as_timestamp(e.start) | timestamp_custom('%Y-%m-%d') }}|{{ as_timestamp(e.start) | timestamp_custom('%H:%M') }}|0
+              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
