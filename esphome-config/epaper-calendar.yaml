@@ -105,14 +105,14 @@ external_components:
       url: https://github.com/acegallagher/esphome-bigink
       ref: main
       path: bigink_component
-    components: [seeed_epaper_spectra6, battery_monitor]
+    components: [seeed_epaper_spectra6]
 
-# ── Battery Monitor (Seeed EE02 board ADC on GPIO1, divider enable on GPIO6) ──
-battery_monitor:
-  id: board_battery_monitor
-  voltage_pin: 1
-  enable_pin: GPIO6
-  samples_to_average: 10
+# ── Battery ADC Enable Switch (GPIO6) ──
+switch:
+  - platform: gpio
+    pin: GPIO6
+    id: battery_adc_enable
+    restore_mode: ALWAYS_ON
 
 # ── Time source ──
 time:
@@ -121,14 +121,54 @@ time:
 
 # ── Weather & Battery Sensors ──
 sensor:
-  - platform: battery_monitor
-    battery_monitor_id: board_battery_monitor
-    voltage:
-      name: "ePaper Battery Voltage"
-      id: battery_voltage
-    percentage:
-      name: "ePaper Battery Level"
-      id: battery_percentage
+  - platform: adc
+    pin: GPIO1
+    name: "ePaper Battery Voltage"
+    id: battery_voltage
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: 60s
+    attenuation: 11db
+    filters:
+      - multiply: 2.0
+
+  - platform: copy
+    source_id: battery_voltage
+    name: "ePaper Battery Level"
+    id: battery_percentage
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - lambda: |-
+          static float smooth_v = 0.0f;
+          float raw_v = x;
+
+          if (smooth_v < 2.0f) {
+            smooth_v = raw_v;
+            return smooth_v;
+          }
+
+          // If USB charger is connected (terminal voltage jumps > +0.04V):
+          if (raw_v > smooth_v + 0.04f) {
+            float target = raw_v - 0.08f;
+            if (target > smooth_v) {
+              smooth_v += 0.005f;  // Smoothly ramp percentage up as real charge accumulates
+            }
+          } else {
+            // Unplugged: smooth_v follows raw resting voltage
+            smooth_v = raw_v;
+          }
+          return smooth_v;
+      - calibrate_linear:
+          - 3.2 -> 0
+          - 4.2 -> 100
+      - clamp:
+          min_value: 0
+          max_value: 100
 
   - platform: homeassistant
     id: ha_weather_temp
@@ -840,13 +880,14 @@ display:
       // Battery status indicator in footer
       float bat_pct = id(battery_percentage).state;
       float bat_v   = id(battery_voltage).state;
+      bool is_charging = id(battery_charging).state;
       if (!std::isnan(bat_pct) && bat_pct >= 0) {
-        Color bat_color = GREEN;
-        if (bat_pct < 20.0f) bat_color = RED;
-        else if (bat_pct < 40.0f) bat_color = YELLOW;
+        Color bat_color = is_charging ? GREEN : (bat_pct < 20.0f ? RED : (bat_pct < 40.0f ? YELLOW : GREEN));
 
         char bat_buf[64];
-        if (!std::isnan(bat_v) && bat_v > 0) {
+        if (is_charging) {
+          snprintf(bat_buf, sizeof(bat_buf), "ePaper Calendar  |  Battery: %.0f%% (%.2fV) [CHARGING ⚡]", bat_pct, bat_v);
+        } else if (!std::isnan(bat_v) && bat_v > 0) {
           snprintf(bat_buf, sizeof(bat_buf), "ePaper Calendar  |  Battery: %.0f%% (%.2fV)", bat_pct, bat_v);
         } else {
           snprintf(bat_buf, sizeof(bat_buf), "ePaper Calendar  |  Battery: %.0f%%", bat_pct);
@@ -858,8 +899,48 @@ display:
                   TextAlign::TOP_LEFT, "ePaper Calendar Dashboard");
       }
 
-# ── Buttons (EE02 board buttons: D1 GPIO2 is hardware wake pin for deep_sleep) ──
+# ── Binary Sensors ──
 binary_sensor:
+  - platform: template
+    name: "ePaper Battery Charging"
+    id: battery_charging
+    device_class: battery_charging
+    lambda: |-
+      static float last_unplugged_v = 3.60f;
+      static float prev_v = 0.0f;
+
+      if (!id(battery_voltage).has_state()) return false;
+      float cur_v = id(battery_voltage).state;
+
+      if (prev_v < 2.0f) {
+        prev_v = cur_v;
+        return false;
+      }
+
+      float delta = cur_v - prev_v;
+
+      // Upper charge curve (always charging)
+      if (cur_v >= 4.18f) {
+        prev_v = cur_v;
+        return true;
+      }
+
+      // Detect voltage jump (+0.04V or higher) when USB charger is plugged in
+      if (delta >= 0.04f) {
+        prev_v = cur_v;
+        return true;
+      }
+
+      // Detect voltage drop (-0.04V or lower) when charger is unplugged
+      if (delta <= -0.04f) {
+        last_unplugged_v = cur_v;
+        prev_v = cur_v;
+        return false;
+      }
+
+      prev_v = cur_v;
+      // Active charging if current voltage remains above baseline unplugged voltage + 0.04V
+      return (cur_v > last_unplugged_v + 0.04f);
   - platform: gpio
     pin:
       number: GPIO3
