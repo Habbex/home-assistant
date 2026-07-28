@@ -95,6 +95,13 @@ wifi:
 
 captive_portal:
 
+# ── Globals (survive deep sleep via RTC memory) ──
+globals:
+  - id: prev_battery_voltage
+    type: float
+    restore_value: yes
+    initial_value: '0.0'
+
 # ── Custom component: bigink display driver ──
 # The EE02 board has dual SPI controllers (master/slave) that the
 # standard ESPHome epaper_spi component cannot handle. This custom
@@ -563,54 +570,118 @@ display:
         return str;
       };
 
-      // ── Render Event Blocks ──
+      // Format decimal hours (e.g. 9.5 -> "09:30")
+      auto format_time = [](float h_dec) -> std::string {
+        int h = (int)h_dec;
+        int m = (int)roundf((h_dec - h) * 60.0f);
+        if (m >= 60) { h += 1; m = 0; }
+        if (h > 24) h = 24;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+        return std::string(buf);
+      };
+
+      // ── Render Event Blocks (Multi-day Aware) ──
       auto render_event_block = [&](const std::string &line) {
         if (line.empty() || line == "unknown" || line == "unavailable") return;
 
-        std::string title, day_str, sh_str, eh_str, allday_str;
-        size_t p1 = line.find('|');
-        if (p1 == std::string::npos) return;
-        title = line.substr(0, p1);
+        std::vector<std::string> parts;
+        size_t start = 0;
+        size_t end = line.find('|');
+        while (end != std::string::npos) {
+          parts.push_back(line.substr(start, end - start));
+          start = end + 1;
+          end = line.find('|', start);
+        }
+        parts.push_back(line.substr(start));
 
-        size_t p2 = line.find('|', p1 + 1);
-        if (p2 == std::string::npos) return;
-        day_str = line.substr(p1 + 1, p2 - p1 - 1);
+        if (parts.size() < 5) return;
 
-        size_t p3 = line.find('|', p2 + 1);
-        if (p3 == std::string::npos) return;
-        sh_str = line.substr(p2 + 1, p3 - p2 - 1);
+        std::string title = parts[0];
+        int start_day = 0;
+        int end_day = 0;
+        float start_h = 0.0f;
+        float end_h = 24.0f;
+        bool is_allday = false;
 
-        size_t p4 = line.find('|', p3 + 1);
-        if (p4 == std::string::npos) {
-          eh_str = line.substr(p3 + 1);
+        if (parts.size() >= 6) {
+          start_day = atoi(parts[1].c_str());
+          end_day = atoi(parts[2].c_str());
+          start_h = atof(parts[3].c_str());
+          end_h = atof(parts[4].c_str());
+          is_allday = (parts[5] == "1");
         } else {
-          eh_str = line.substr(p3 + 1, p4 - p3 - 1);
-          allday_str = line.substr(p4 + 1);
+          start_day = atoi(parts[1].c_str());
+          end_day = start_day;
+          start_h = atof(parts[2].c_str());
+          end_h = atof(parts[3].c_str());
+          is_allday = (parts[4] == "1");
         }
 
-        int day_idx = atoi(day_str.c_str());
-        float start_h = atof(sh_str.c_str());
-        float end_h = atof(eh_str.c_str());
-        bool is_allday = (allday_str == "1");
-
-        if (day_idx < 0 || day_idx >= 7) return;
-
-        int bx = GRID_X + (day_idx * COL_W) + 2;
-        int bw = COL_W - 4;
-
-        int by = GRID_Y + (int)((start_h / 24.0f) * GRID_H);
-        int bh = (int)(((end_h - start_h) / 24.0f) * GRID_H);
-        if (bh < 30) bh = 30;
+        if (start_day < 0 || start_day >= 7) return;
+        if (end_day < start_day) end_day = start_day;
+        if (end_day >= 7) end_day = 6;
 
         Color bg_col = is_allday ? GREEN : BLUE;
         Color text_col = WHITE;
 
-        it.filled_rectangle(bx, by, bw, bh, bg_col);
-        it.rectangle(bx, by, bw, bh, BLACK);
+        if (is_allday) {
+          // Continuous multi-day bar across all spanned columns
+          int span = (end_day - start_day) + 1;
+          int bx = GRID_X + (start_day * COL_W) + 2;
+          int bw = (span * COL_W) - 4;
 
-        std::string short_title = truncate_utf8(title, 11);
-        it.printf(bx + (bw / 2), by + (bh / 2), id(font_event_small), text_col,
-                  TextAlign::CENTER, "%s", short_title.c_str());
+          int by = GRID_Y + (int)((start_h / 24.0f) * GRID_H);
+          int bh = (int)(((end_h - start_h) / 24.0f) * GRID_H);
+          if (bh < 36) bh = 36;
+
+          it.filled_rectangle(bx, by, bw, bh, bg_col);
+          it.rectangle(bx, by, bw, bh, BLACK);
+
+          std::string short_title = truncate_utf8(title, 12 * span);
+          if (bh >= 48) {
+            it.printf(bx + (bw / 2), by + (bh / 2) - 8, id(font_event_small), text_col,
+                      TextAlign::CENTER, "%s", short_title.c_str());
+            it.printf(bx + (bw / 2), by + (bh / 2) + 10, id(font_footer), text_col,
+                      TextAlign::CENTER, "All day");
+          } else {
+            it.printf(bx + (bw / 2), by + (bh / 2), id(font_event_small), text_col,
+                      TextAlign::CENTER, "%s", short_title.c_str());
+          }
+        } else {
+          // Timed event (single or multi-day blocks)
+          for (int d = start_day; d <= end_day; d++) {
+            float cur_sh = (d == start_day) ? start_h : 0.0f;
+            float cur_eh = (d == end_day) ? end_h : 24.0f;
+
+            int bx = GRID_X + (d * COL_W) + 2;
+            int bw = COL_W - 4;
+
+            int by = GRID_Y + (int)((cur_sh / 24.0f) * GRID_H);
+            int bh = (int)(((cur_eh - cur_sh) / 24.0f) * GRID_H);
+            if (bh < 36) bh = 36;
+
+            it.filled_rectangle(bx, by, bw, bh, bg_col);
+            it.rectangle(bx, by, bw, bh, BLACK);
+
+            std::string time_str = format_time(cur_sh) + "-" + format_time(cur_eh);
+            std::string short_title = truncate_utf8(title, 8);
+
+            if (bh >= 56) {
+              // Tall block: title on top line, time below
+              it.printf(bx + (bw / 2), by + (bh / 2) - 10, id(font_event_small), text_col,
+                        TextAlign::CENTER, "%s", short_title.c_str());
+              it.printf(bx + (bw / 2), by + (bh / 2) + 10, id(font_footer), text_col,
+                        TextAlign::CENTER, "%s", time_str.c_str());
+            } else {
+              // Short block: time on top, title below (always visible)
+              it.printf(bx + (bw / 2), by + 2, id(font_footer), text_col,
+                        TextAlign::TOP_CENTER, "%s", time_str.c_str());
+              it.printf(bx + (bw / 2), by + 18, id(font_footer), text_col,
+                        TextAlign::TOP_CENTER, "%s", short_title.c_str());
+            }
+          }
+        }
       };
 
       esphome::text_sensor::TextSensor* cal_sensors[] = {
@@ -777,9 +848,15 @@ display:
           it.printf(px + panel_w / 2, py + 38, id(mdi_small), BLUE,
                     TextAlign::TOP_CENTER, "%s", f_icon.c_str());
 
-          // Hi / Lo temps
-          it.printf(px + panel_w / 2, py + 92, id(font_weather_small), RED,
-                    TextAlign::TOP_CENTER, "%s°  %s°", f_hi.c_str(), f_lo.c_str());
+          // Hi / Lo temps (High in RED, Low in BLACK)
+          char temp_hi_buf[16], temp_lo_buf[16];
+          snprintf(temp_hi_buf, sizeof(temp_hi_buf), "%s°", f_hi.c_str());
+          snprintf(temp_lo_buf, sizeof(temp_lo_buf), "%s°", f_lo.c_str());
+
+          it.printf(px + (panel_w / 2) - 22, py + 92, id(font_weather_small), RED,
+                    TextAlign::TOP_CENTER, "%s", temp_hi_buf);
+          it.printf(px + (panel_w / 2) + 22, py + 92, id(font_weather_small), BLACK,
+                    TextAlign::TOP_CENTER, "%s", temp_lo_buf);
 
           // Condition label
           it.printf(px + panel_w / 2, py + 120, id(font_footer), BLACK,
@@ -842,10 +919,10 @@ display:
 
       CountdownItem items[] = {
         {"First Date",    7,  30, "\U000F02D1", RED},     // Heart (F02D1)
+        {"Amelie's Bday", 12, 29, "\U000F00E9", RED},      // Cake (F00E9)
         {"Ehab's Bday",   7,  23, "\U000F00EB", BLUE},    // Gift (F00EB)
         {"Halloween",     10, 31, "\U000F0BA3", RED},     // Pumpkin (F0BA3)
-        {"Christmas",     12, 24, "\U000F0405", GREEN},   // Tree (F0405)
-        {"Amelie's Bday", 12, 29, "\U000F00E9", RED}      // Cake (F00E9)
+        {"Christmas",     12, 24, "\U000F0405", GREEN}  // Tree (F0405)
       };
 
       for (int i = 0; i < 5; i++) {
@@ -931,41 +1008,27 @@ binary_sensor:
     id: battery_charging
     device_class: battery_charging
     lambda: |-
-      static float last_unplugged_v = 3.60f;
-      static float prev_v = 0.0f;
-
       if (!id(battery_voltage).has_state()) return false;
       float cur_v = id(battery_voltage).state;
+      float prev_v = id(prev_battery_voltage);
 
-      if (prev_v < 2.0f) {
-        prev_v = cur_v;
-        return false;
-      }
+      // Save current voltage for next wake cycle (survives deep sleep)
+      id(prev_battery_voltage) = cur_v;
+
+      // First reading ever (no previous data)
+      if (prev_v < 2.0f) return false;
 
       float delta = cur_v - prev_v;
 
-      // Upper charge curve (always charging)
-      if (cur_v >= 4.18f) {
-        prev_v = cur_v;
-        return true;
-      }
+      // Charging detection: voltage rose by 0.02V+ since last wake cycle
+      // (USB charger raises terminal voltage immediately)
+      if (delta >= 0.02f) return true;
 
-      // Detect voltage jump (+0.04V or higher) when USB charger is plugged in
-      if (delta >= 0.04f) {
-        prev_v = cur_v;
-        return true;
-      }
+      // Near-full charge: charger holds voltage at 4.18V+
+      if (cur_v >= 4.18f) return true;
 
-      // Detect voltage drop (-0.04V or lower) when charger is unplugged
-      if (delta <= -0.04f) {
-        last_unplugged_v = cur_v;
-        prev_v = cur_v;
-        return false;
-      }
-
-      prev_v = cur_v;
-      // Active charging if current voltage remains above baseline unplugged voltage + 0.04V
-      return (cur_v > last_unplugged_v + 0.04f);
+      // Voltage dropped or stayed flat → not charging
+      return false;
   - platform: gpio
     pin:
       number: GPIO3
@@ -977,7 +1040,8 @@ binary_sensor:
     id: btn_d2
     on_press:
       then:
-        - logger.log: "D2 pressed"
+        - logger.log: "Button D2 pressed — Refreshing display!"
+        - component.update: epaper_display
 
   - platform: gpio
     pin:
@@ -990,7 +1054,8 @@ binary_sensor:
     id: btn_d4
     on_press:
       then:
-        - logger.log: "D4 pressed"
+        - logger.log: "Button D4 pressed — Refreshing display!"
+        - component.update: epaper_display
 
 # ── Buttons exposed to HA ──
 button:
@@ -1006,15 +1071,14 @@ button:
         - logger.log: "Refresh button pressed in Home Assistant"
         - component.update: epaper_display
 
-# ── Deep Sleep (Temporarily commented out for initial HA pairing) ──
-# Uncomment after Home Assistant has paired with the device.
-# deep_sleep:
-#   id: deep_sleep_control
-#   sleep_duration: 15min
-#   wakeup_pin:
-#     number: GPIO2
-#     inverted: true
-#     mode:
-#       input: true
-#       pullup: true
+# ── Deep Sleep Control ──
+deep_sleep:
+  id: deep_sleep_control
+  sleep_duration: 15min
+  wakeup_pin:
+    number: GPIO2
+    inverted: true
+    mode:
+      input: true
+      pullup: true
 

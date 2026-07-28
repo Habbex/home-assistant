@@ -3,9 +3,9 @@
 #
 # Runs every 15 minutes to fetch upcoming Google Calendar events for
 # the week and formats up to 8 events into structured strings:
-#   TITLE|DAY_INDEX|START_HOUR|END_HOUR|ALLDAY
+#   TITLE|START_DAY|END_DAY|START_HOUR|END_HOUR|ALLDAY
 #
-#   DAY_INDEX: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
+#   START_DAY / END_DAY: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
 #   START_HOUR / END_HOUR: Decimal hours (e.g. 9.5 = 09:30, 0.0-24.0)
 # ──────────────────────────────────────────────────────────────────────
 - id: epaper_fetch_calendar_events
@@ -60,13 +60,20 @@
             {% set e = events[0] %}
             {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
             {% if is_allday == '1' %}
-              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
+              {% set s_ts = as_timestamp(e.start ~ 'T00:00:00') %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end ~ 'T00:00:00') - 86400 %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_day = 6 if e_day < s_day and e_ts > s_ts else e_day %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|0.0|24.0|1
             {% else %}
-              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
-              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
-              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
+              {% set s_ts = as_timestamp(e.start) %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end) %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (s_ts | timestamp_custom('%H') | float) + (s_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (e_ts | timestamp_custom('%H') | float) + (e_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -79,13 +86,20 @@
             {% set e = events[1] %}
             {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
             {% if is_allday == '1' %}
-              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
+              {% set s_ts = as_timestamp(e.start ~ 'T00:00:00') %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end ~ 'T00:00:00') - 86400 %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_day = 6 if e_day < s_day and e_ts > s_ts else e_day %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|0.0|24.0|1
             {% else %}
-              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
-              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
-              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
+              {% set s_ts = as_timestamp(e.start) %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end) %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (s_ts | timestamp_custom('%H') | float) + (s_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (e_ts | timestamp_custom('%H') | float) + (e_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -98,13 +112,20 @@
             {% set e = events[2] %}
             {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
             {% if is_allday == '1' %}
-              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
+              {% set s_ts = as_timestamp(e.start ~ 'T00:00:00') %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end ~ 'T00:00:00') - 86400 %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_day = 6 if e_day < s_day and e_ts > s_ts else e_day %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|0.0|24.0|1
             {% else %}
-              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
-              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
-              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
+              {% set s_ts = as_timestamp(e.start) %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end) %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (s_ts | timestamp_custom('%H') | float) + (s_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (e_ts | timestamp_custom('%H') | float) + (e_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -117,13 +138,20 @@
             {% set e = events[3] %}
             {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
             {% if is_allday == '1' %}
-              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
+              {% set s_ts = as_timestamp(e.start ~ 'T00:00:00') %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end ~ 'T00:00:00') - 86400 %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_day = 6 if e_day < s_day and e_ts > s_ts else e_day %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|0.0|24.0|1
             {% else %}
-              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
-              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
-              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
+              {% set s_ts = as_timestamp(e.start) %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end) %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (s_ts | timestamp_custom('%H') | float) + (s_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (e_ts | timestamp_custom('%H') | float) + (e_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -136,13 +164,20 @@
             {% set e = events[4] %}
             {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
             {% if is_allday == '1' %}
-              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
+              {% set s_ts = as_timestamp(e.start ~ 'T00:00:00') %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end ~ 'T00:00:00') - 86400 %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_day = 6 if e_day < s_day and e_ts > s_ts else e_day %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|0.0|24.0|1
             {% else %}
-              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
-              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
-              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
+              {% set s_ts = as_timestamp(e.start) %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end) %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (s_ts | timestamp_custom('%H') | float) + (s_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (e_ts | timestamp_custom('%H') | float) + (e_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -155,13 +190,20 @@
             {% set e = events[5] %}
             {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
             {% if is_allday == '1' %}
-              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
+              {% set s_ts = as_timestamp(e.start ~ 'T00:00:00') %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end ~ 'T00:00:00') - 86400 %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_day = 6 if e_day < s_day and e_ts > s_ts else e_day %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|0.0|24.0|1
             {% else %}
-              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
-              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
-              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
+              {% set s_ts = as_timestamp(e.start) %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end) %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (s_ts | timestamp_custom('%H') | float) + (s_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (e_ts | timestamp_custom('%H') | float) + (e_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -174,13 +216,20 @@
             {% set e = events[6] %}
             {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
             {% if is_allday == '1' %}
-              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
+              {% set s_ts = as_timestamp(e.start ~ 'T00:00:00') %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end ~ 'T00:00:00') - 86400 %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_day = 6 if e_day < s_day and e_ts > s_ts else e_day %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|0.0|24.0|1
             {% else %}
-              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
-              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
-              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
+              {% set s_ts = as_timestamp(e.start) %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end) %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (s_ts | timestamp_custom('%H') | float) + (s_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (e_ts | timestamp_custom('%H') | float) + (e_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
     - action: input_text.set_value
@@ -193,12 +242,19 @@
             {% set e = events[7] %}
             {% set is_allday = '1' if e.start is string and 'T' not in e.start else '0' %}
             {% if is_allday == '1' %}
-              {% set day_idx = (as_timestamp(e.start ~ 'T00:00:00') | timestamp_custom('%w') | int + 6) % 7 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|0.0|24.0|1
+              {% set s_ts = as_timestamp(e.start ~ 'T00:00:00') %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end ~ 'T00:00:00') - 86400 %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_day = 6 if e_day < s_day and e_ts > s_ts else e_day %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|0.0|24.0|1
             {% else %}
-              {% set day_idx = (as_timestamp(e.start) | timestamp_custom('%w') | int + 6) % 7 %}
-              {% set sh = (as_timestamp(e.start) | timestamp_custom('%H') | float) + (as_timestamp(e.start) | timestamp_custom('%M') | float) / 60.0 %}
-              {% set eh = (as_timestamp(e.end) | timestamp_custom('%H') | float) + (as_timestamp(e.end) | timestamp_custom('%M') | float) / 60.0 %}
-              {{ e.summary[:30] }}|{{ day_idx }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
+              {% set s_ts = as_timestamp(e.start) %}
+              {% set s_day = (s_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set e_ts = as_timestamp(e.end) %}
+              {% set e_day = (e_ts | timestamp_custom('%w') | int + 6) % 7 %}
+              {% set sh = (s_ts | timestamp_custom('%H') | float) + (s_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {% set eh = (e_ts | timestamp_custom('%H') | float) + (e_ts | timestamp_custom('%M') | float) / 60.0 %}
+              {{ e.summary[:30] }}|{{ s_day }}|{{ e_day }}|{{ sh | round(2) }}|{{ eh | round(2) }}|0
             {% endif %}
           {% endif %}
