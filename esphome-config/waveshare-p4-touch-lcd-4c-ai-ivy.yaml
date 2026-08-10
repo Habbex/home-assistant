@@ -219,9 +219,14 @@ external_components:
   # may have fixed the SDIO starvation issue on the P4).
   - source:
       type: git
+      url: https://github.com/n-IA-hane/esphome-audio-stack
+      ref: v2026.7.0
+    components: [esp_audio_stack, esp_aec]
+  - source:
+      type: git
       url: https://github.com/n-IA-hane/esphome-intercom
       ref: v2026.6.2
-    components: [audio_processor, esp_audio_stack, esp_aec, speaker]
+    components: [audio_processor, speaker]
 
 # audio_dac / audio_adc blocks removed — codec config is now embedded in
 # esp_audio_stack below (v2026.6.0 migration: standalone codec components
