@@ -34,6 +34,13 @@ esphome:
   on_boot:
     - priority: -100
       then:
+        # ── Read battery voltage (enable ADC → read → disable) ──
+        - switch.turn_on: battery_adc_enable
+        - delay: 100ms
+        - component.update: battery_voltage
+        - delay: 50ms
+        - switch.turn_off: battery_adc_enable
+
         - wait_until:
             condition:
               wifi.connected:
@@ -55,13 +62,18 @@ esphome:
                     - delay: 5s
                     - logger.log: "Updating ePaper display..."
                     - component.update: epaper_display
-                    # - deep_sleep.enter: deep_sleep_control (uncomment after HA pairing)
+                    - delay: 2s
+                    - deep_sleep.enter: deep_sleep_control
                   else:
-                    - logger.log: "HA API not yet paired — staying awake for pairing"
+                    - logger.log: "HA API timeout — updating display with cached data"
                     - component.update: epaper_display
+                    - delay: 5s
+                    - deep_sleep.enter: deep_sleep_control
             else:
               - logger.log: "WiFi timeout — showing fallback"
               - component.update: epaper_display
+              - delay: 5s
+              - deep_sleep.enter: deep_sleep_control
 
 esp32:
   board: seeed_xiao_esp32s3
@@ -89,18 +101,12 @@ wifi:
   password: !secret wifi_password
   power_save_mode: light
   fast_connect: true
-  ap:
-    ssid: "ePaper-Calendar-AP"
-    password: !secret ap_pwd
+  # Captive portal + fallback AP removed — drains battery if WiFi fails.
+  # Device will enter deep sleep on WiFi failure instead.
 
-captive_portal:
+# Globals section removed — prev_battery_voltage no longer needed
+# after charging detection was simplified.
 
-# ── Globals (survive deep sleep via RTC memory) ──
-globals:
-  - id: prev_battery_voltage
-    type: float
-    restore_value: yes
-    initial_value: '0.0'
 
 # ── Custom component: bigink display driver ──
 # The EE02 board has dual SPI controllers (master/slave) that the
@@ -119,7 +125,7 @@ switch:
   - platform: gpio
     pin: GPIO6
     id: battery_adc_enable
-    restore_mode: ALWAYS_ON
+    restore_mode: ALWAYS_OFF
 
 # ── Time source ──
 time:
@@ -136,7 +142,7 @@ sensor:
     device_class: voltage
     state_class: measurement
     accuracy_decimals: 2
-    update_interval: 60s
+    update_interval: never
     attenuation: 11db
     filters:
       - multiply: 2.0
@@ -150,26 +156,8 @@ sensor:
     state_class: measurement
     accuracy_decimals: 0
     filters:
-      - lambda: |-
-          static float smooth_v = 0.0f;
-          float raw_v = x;
-
-          if (smooth_v < 2.0f) {
-            smooth_v = raw_v;
-            return smooth_v;
-          }
-
-          // If USB charger is connected (terminal voltage jumps > +0.04V):
-          if (raw_v > smooth_v + 0.04f) {
-            float target = raw_v - 0.08f;
-            if (target > smooth_v) {
-              smooth_v += 0.005f;  // Smoothly ramp percentage up as real charge accumulates
-            }
-          } else {
-            // Unplugged: smooth_v follows raw resting voltage
-            smooth_v = raw_v;
-          }
-          return smooth_v;
+      # Pass voltage through directly — charging detection is handled
+      # separately by the battery_charging binary sensor.
       - calibrate_linear:
           - 3.2 -> 0
           - 4.2 -> 100
@@ -208,7 +196,6 @@ text_sensor:
     on_value:
       then:
         - logger.log: "Weather forecast updated from Home Assistant"
-        - component.update: epaper_display
 
   # Calendar events — 8 lines, each: "TITLE|DATE|TIME|ALLDAY"
   - platform: homeassistant
@@ -407,7 +394,7 @@ font:
 display:
   - platform: seeed_epaper_spectra6
     id: epaper_display
-    update_interval: 15min
+    update_interval: never
     clk_pin: 7
     mosi_pin: 9
     cs_master_pin: GPIO44
@@ -1008,27 +995,16 @@ binary_sensor:
     id: battery_charging
     device_class: battery_charging
     lambda: |-
+      // Charging detection: when USB is connected, the charger IC raises
+      // the battery terminal voltage above its open-circuit voltage.
+      // A fully-charged resting LiPo sits at ~4.15V. With USB connected
+      // and charger active, terminal voltage is pushed to 4.20-4.25V+.
+      // Threshold at 4.25V catches active charging at high SoC.
+      // Note: for reliable detection at all charge levels, monitor the
+      // 5V rail with a voltage divider on a free GPIO (hardware mod).
       if (!id(battery_voltage).has_state()) return false;
-      float cur_v = id(battery_voltage).state;
-      float prev_v = id(prev_battery_voltage);
-
-      // Save current voltage for next wake cycle (survives deep sleep)
-      id(prev_battery_voltage) = cur_v;
-
-      // First reading ever (no previous data)
-      if (prev_v < 2.0f) return false;
-
-      float delta = cur_v - prev_v;
-
-      // Charging detection: voltage rose by 0.02V+ since last wake cycle
-      // (USB charger raises terminal voltage immediately)
-      if (delta >= 0.02f) return true;
-
-      // Near-full charge: charger holds voltage at 4.18V+
-      if (cur_v >= 4.18f) return true;
-
-      // Voltage dropped or stayed flat → not charging
-      return false;
+      float v = id(battery_voltage).state;
+      return v > 4.25f;
   - platform: gpio
     pin:
       number: GPIO3
@@ -1074,7 +1050,8 @@ button:
 # ── Deep Sleep Control ──
 deep_sleep:
   id: deep_sleep_control
-  sleep_duration: 15min
+  run_duration: 90s
+  sleep_duration: 6h
   wakeup_pin:
     number: GPIO2
     inverted: true

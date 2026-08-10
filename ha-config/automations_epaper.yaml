@@ -14,7 +14,7 @@
   mode: single
   triggers:
     - trigger: time_pattern
-      minutes: "/15"
+      hours: "/6"
     - trigger: homeassistant
       event: start
   actions:
