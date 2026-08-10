@@ -1,4 +1,33 @@
-secrets.yaml
-ha-config/**
-config/**
-esphome-config/**
+# Secrets
+*secrets.yaml
+!secrets.yaml.example
+
+# Runtime HA data, DBs & logs
+config/
+.storage/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.log.*
+.ha_run.lock
+.HA_VERSION
+.cloud/
+
+# ESPHome & PlatformIO build / toolchain artifacts
+.esphome/
+esphome-config/.esphome/
+esphome-config/.platformio/
+esphome-config/.device-builder*
+.device-builder*
+.pio/
+.pioenvs/
+
+# Caches
+__pycache__/
+*.pyc
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/

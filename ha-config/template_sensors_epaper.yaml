@@ -1,0 +1,40 @@
+# ──────────────────────────────────────────────────────────────────────
+# ePaper Calendar + Weather — Template Sensors
+#
+# Pre-formats weather data into values that ESPHome can consume
+# via sensor/text_sensor. Calendar data comes from input_text helpers
+# populated by automations_epaper.yaml.
+#
+# Required HA integrations:
+#   - Google Calendar (calendar.YOUR_CALENDAR_ENTITY)
+#   - Weather (weather.forecast_home)
+# ──────────────────────────────────────────────────────────────────────
+
+# ── Standard template sensors (polled) ──
+- sensor:
+    # Current weather temperature (numeric, for formatting in ESPHome)
+    - name: "ePaper Weather Temperature"
+      unique_id: epaper_weather_temperature
+      unit_of_measurement: "°C"
+      state: >
+        {{ state_attr('weather.forecast_home', 'temperature') | default(0) }}
+
+    # Current weather humidity
+    - name: "ePaper Weather Humidity"
+      unique_id: epaper_weather_humidity
+      unit_of_measurement: "%"
+      state: >
+        {{ state_attr('weather.forecast_home', 'humidity') | default(0) }}
+
+    # Current wind speed
+    - name: "ePaper Weather Wind Speed"
+      unique_id: epaper_weather_wind_speed
+      unit_of_measurement: "km/h"
+      state: >
+        {{ state_attr('weather.forecast_home', 'wind_speed') | default(0) }}
+
+    # Weather forecast text line read by ESPHome
+    - name: "ePaper Weather Forecast"
+      unique_id: epaper_weather_forecast
+      state: >
+        {{ states('input_text.epaper_weather_forecast_data') }}

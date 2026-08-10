@@ -1,0 +1,1061 @@
+# =============================================================================
+# ePaper Calendar + Weather Dashboard
+#
+# Hardware: Seeed XIAO ESP32-S3 Plus + EE02 Driver Board + 13.3" Spectra 6
+# Display:  1600×1200, 6 colors (Black, White, Red, Yellow, Blue, Green)
+# Driver:   acegallagher/esphome-bigink custom component (dual-controller SPI)
+#
+# Data sources:
+#   - Google Calendar events via HA input_text helpers
+#   - Weather from weather.forecast_home
+#   - Time from HA
+#
+# https://github.com/acegallagher/esphome-bigink
+# =============================================================================
+
+esphome:
+  name: epaper-calendar
+  friendly_name: "ePaper Calendar Dashboard"
+  name_add_mac_suffix: false
+
+  platformio_options:
+    board_build.arduino.memory_type: qio_opi
+    board_build.f_flash: 80000000L
+    board_build.flash_mode: qio
+    build_flags:
+      - "-DBOARD_HAS_PSRAM"
+      - "-mfix-esp32-psram-cache-issue"
+    lib_deps:
+      - SPI
+    lib_ignore:
+      - esp_insights
+      - esp_rainmaker
+
+  on_boot:
+    - priority: -100
+      then:
+        # ── Read battery voltage (enable ADC → read → disable) ──
+        - switch.turn_on: battery_adc_enable
+        - delay: 100ms
+        - component.update: battery_voltage
+        - delay: 50ms
+        - switch.turn_off: battery_adc_enable
+
+        - wait_until:
+            condition:
+              wifi.connected:
+            timeout: 20s
+        - if:
+            condition:
+              wifi.connected:
+            then:
+              - logger.log: "WiFi connected, waiting for HA API..."
+              - wait_until:
+                  condition:
+                    api.connected:
+                  timeout: 15s
+              - if:
+                  condition:
+                    api.connected:
+                  then:
+                    - logger.log: "HA API connected. Syncing data..."
+                    - delay: 5s
+                    - logger.log: "Updating ePaper display..."
+                    - component.update: epaper_display
+                    - delay: 2s
+                    - deep_sleep.enter: deep_sleep_control
+                  else:
+                    - logger.log: "HA API timeout — updating display with cached data"
+                    - component.update: epaper_display
+                    - delay: 5s
+                    - deep_sleep.enter: deep_sleep_control
+            else:
+              - logger.log: "WiFi timeout — showing fallback"
+              - component.update: epaper_display
+              - delay: 5s
+              - deep_sleep.enter: deep_sleep_control
+
+esp32:
+  board: seeed_xiao_esp32s3
+  variant: esp32s3
+  framework:
+    type: arduino
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret epaper_api
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: light
+  fast_connect: true
+  # Captive portal + fallback AP removed — drains battery if WiFi fails.
+  # Device will enter deep sleep on WiFi failure instead.
+
+# Globals section removed — prev_battery_voltage no longer needed
+# after charging detection was simplified.
+
+
+# ── Custom component: bigink display driver ──
+# The EE02 board has dual SPI controllers (master/slave) that the
+# standard ESPHome epaper_spi component cannot handle. This custom
+# component provides the driver.
+external_components:
+  - source:
+      type: git
+      url: https://github.com/acegallagher/esphome-bigink
+      ref: main
+      path: bigink_component
+    components: [seeed_epaper_spectra6]
+
+# ── Battery ADC Enable Switch (GPIO6) ──
+switch:
+  - platform: gpio
+    pin: GPIO6
+    id: battery_adc_enable
+    restore_mode: ALWAYS_OFF
+
+# ── Time source ──
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# ── Weather & Battery Sensors ──
+sensor:
+  - platform: adc
+    pin: GPIO1
+    name: "ePaper Battery Voltage"
+    id: battery_voltage
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: never
+    attenuation: 11db
+    filters:
+      - multiply: 2.0
+
+  - platform: copy
+    source_id: battery_voltage
+    name: "ePaper Battery Level"
+    id: battery_percentage
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      # Pass voltage through directly — charging detection is handled
+      # separately by the battery_charging binary sensor.
+      - calibrate_linear:
+          - 3.2 -> 0
+          - 4.2 -> 100
+      - clamp:
+          min_value: 0
+          max_value: 100
+
+  - platform: homeassistant
+    id: ha_weather_temp
+    entity_id: weather.forecast_home
+    attribute: temperature
+    accuracy_decimals: 0
+
+  - platform: homeassistant
+    id: ha_weather_humidity
+    entity_id: weather.forecast_home
+    attribute: humidity
+    accuracy_decimals: 0
+
+  - platform: homeassistant
+    id: ha_weather_wind
+    entity_id: weather.forecast_home
+    attribute: wind_speed
+    accuracy_decimals: 0
+
+text_sensor:
+  # Current weather condition (sunny, cloudy, rainy, etc.)
+  - platform: homeassistant
+    id: ha_weather_condition
+    entity_id: weather.forecast_home
+
+  # Weather forecast (compact string: "Tue|sunny|23|15;Wed|partlycloudy|27|18;Thu|sunny|27|19")
+  - platform: homeassistant
+    id: ha_weather_forecast
+    entity_id: input_text.epaper_weather_forecast_data
+    on_value:
+      then:
+        - logger.log: "Weather forecast updated from Home Assistant"
+
+  # Calendar events — 8 lines, each: "TITLE|DATE|TIME|ALLDAY"
+  - platform: homeassistant
+    id: cal_line1
+    entity_id: input_text.epaper_calendar_line1
+  - platform: homeassistant
+    id: cal_line2
+    entity_id: input_text.epaper_calendar_line2
+  - platform: homeassistant
+    id: cal_line3
+    entity_id: input_text.epaper_calendar_line3
+  - platform: homeassistant
+    id: cal_line4
+    entity_id: input_text.epaper_calendar_line4
+  - platform: homeassistant
+    id: cal_line5
+    entity_id: input_text.epaper_calendar_line5
+  - platform: homeassistant
+    id: cal_line6
+    entity_id: input_text.epaper_calendar_line6
+  - platform: homeassistant
+    id: cal_line7
+    entity_id: input_text.epaper_calendar_line7
+  - platform: homeassistant
+    id: cal_line8
+    entity_id: input_text.epaper_calendar_line8
+
+# ── Fonts ──
+# Using Google Fonts with full ASCII + Swedish character support (ÅÄÖåäö´’‘).
+font:
+  - file: "gfonts://Roboto"
+    id: font_title
+    size: 48
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto"
+    id: font_header
+    size: 36
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto"
+    id: font_day_header
+    size: 28
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto@700"
+    id: font_day_header_bold
+    size: 28
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto"
+    id: font_event
+    size: 22
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto"
+    id: font_event_small
+    size: 18
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto"
+    id: font_weather_temp
+    size: 72
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto"
+    id: font_weather_cond
+    size: 28
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto"
+    id: font_weather_small
+    size: 24
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  - file: "gfonts://Roboto"
+    id: font_footer
+    size: 20
+    glyphs:
+      - " "
+      - "'"
+      - "´"
+      - "’"
+      - "‘"
+      - '!"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~°ÅÄÖåäö'
+
+  # MDI weather icons
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_large
+    size: 80
+    glyphs:
+      - "\U000F0590"  # weather-cloudy
+      - "\U000F0591"  # weather-fog
+      - "\U000F0592"  # weather-hail
+      - "\U000F0593"  # weather-lightning
+      - "\U000F0594"  # weather-night
+      - "\U000F0595"  # weather-partly-cloudy
+      - "\U000F0596"  # weather-rainy / pouring
+      - "\U000F0597"  # weather-sunny
+      - "\U000F0598"  # weather-snowy
+      - "\U000F059D"  # weather-windy
+      - "\U000F067E"  # weather-lightning-rainy
+      - "\U000F067F"  # weather-snowy-rainy
+
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_small
+    size: 48
+    glyphs:
+      - "\U000F0590"  # weather-cloudy
+      - "\U000F0591"  # weather-fog
+      - "\U000F0592"  # weather-hail
+      - "\U000F0593"  # weather-lightning
+      - "\U000F0594"  # weather-night
+      - "\U000F0595"  # weather-partly-cloudy
+      - "\U000F0596"  # weather-rainy / pouring
+      - "\U000F0597"  # weather-sunny
+      - "\U000F0598"  # weather-snowy
+      - "\U000F059D"  # weather-windy
+      - "\U000F067E"  # weather-lightning-rainy
+      - "\U000F067F"  # weather-snowy-rainy
+
+  # Calendar & Countdown icons (Pictogrammers MDI)
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_calendar
+    size: 32
+    glyphs:
+      - "\U000F00ED"  # calendar
+      - "\U000F0A21"  # calendar-today
+      - "\U000F00E9"  # cake / birthday (F00E9)
+      - "\U000F00EB"  # gift / birthday (F00EB)
+      - "\U000F02D1"  # heart / anniversary (F02D1)
+      - "\U000F0405"  # pine-tree / christmas (F0405)
+      - "\U000F0BA3"  # halloween / pumpkin (F0BA3)
+      - "\U000F0820"  # flash / charging bolt (F0820)
+
+# ── Display ──
+# Resolution: 1600×1200 (landscape)
+# Colors: BLACK=0, WHITE=1, GREEN=2, BLUE=3, RED=4, YELLOW=5
+#
+# Refresh takes ~25-30 seconds. update_interval controls how often
+# the display refreshes. 15min is a good balance for calendar/weather.
+display:
+  - platform: seeed_epaper_spectra6
+    id: epaper_display
+    update_interval: never
+    clk_pin: 7
+    mosi_pin: 9
+    cs_master_pin: GPIO44
+    cs_slave_pin: GPIO41
+    dc_pin: GPIO10
+    reset_pin: GPIO38
+    busy_pin:
+      number: GPIO4
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    power_pin: GPIO43
+    flip_mode: false
+    lambda: |-
+      // ========================================================================
+      // Spectra 6 Color Constants
+      // The bigink component maps these to the display's native palette.
+      // ========================================================================
+      auto BLACK  = Color(0, 0, 0);
+      auto WHITE  = Color(255, 255, 255);
+      auto RED    = Color(255, 0, 0);
+      auto GREEN  = Color(0, 255, 0);
+      auto BLUE   = Color(0, 0, 255);
+      auto YELLOW = Color(255, 255, 0);
+
+      // Screen dimensions
+      const int W = 1600;
+      const int H = 1200;
+
+      // Layout constants
+      const int MARGIN = 20;
+      const int HEADER_H = 70;
+      const int FOOTER_H = 40;
+      const int WEATHER_W = 420;
+      const int CAL_W = W - WEATHER_W - MARGIN * 3;
+      const int CONTENT_TOP = MARGIN + HEADER_H + 10;
+      const int CONTENT_H = H - CONTENT_TOP - FOOTER_H - MARGIN;
+
+      // ── Clear background ──
+      it.fill(WHITE);
+
+      // ════════════════════════════════════════════════════════════════════
+      //  HEADER BAR — Date + Title
+      // ════════════════════════════════════════════════════════════════════
+      it.filled_rectangle(0, 0, W, HEADER_H, BLACK);
+
+      // Current date
+      auto now = id(ha_time).now();
+      if (now.is_valid()) {
+        const char* days[]   = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+        const char* months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                "Jul","Aug","Sep","Oct","Nov","Dec"};
+        char date_buf[64];
+        snprintf(date_buf, sizeof(date_buf), "%s, %d %s %d",
+                 days[now.day_of_week - 1], now.day_of_month,
+                 months[now.month - 1], now.year);
+        it.printf(MARGIN + 5, HEADER_H / 2, id(font_header), WHITE,
+                  TextAlign::CENTER_LEFT, "%s", date_buf);
+
+        // Clock on the right
+        char time_buf[8];
+        snprintf(time_buf, sizeof(time_buf), "%02d:%02d", now.hour, now.minute);
+        it.printf(W - MARGIN - 5, HEADER_H / 2, id(font_header), WHITE,
+                  TextAlign::CENTER_RIGHT, "%s", time_buf);
+      } else {
+        it.printf(MARGIN + 5, HEADER_H / 2, id(font_header), WHITE,
+                  TextAlign::CENTER_LEFT, "Calendar & Weather");
+      }
+
+      // ════════════════════════════════════════════════════════════════════
+      //  7-DAY MON-SUN HOURLY TIMETABLE GRID (Left Side)
+      // ════════════════════════════════════════════════════════════════════
+      const int TIME_AXIS_W = 60;
+      const int GRID_X = MARGIN + TIME_AXIS_W;
+      const int GRID_W = W - WEATHER_W - TIME_AXIS_W - (MARGIN * 3); // ~1140px width
+      const int COL_W  = GRID_W / 7; // ~162px per day column
+
+      const int HEADER_Y = CONTENT_TOP;
+      const int HEADER_HEIGHT = 40;
+      const int GRID_Y = HEADER_Y + HEADER_HEIGHT + 10;
+      const int GRID_H = H - GRID_Y - FOOTER_H - MARGIN - 10; // ~1020px height
+
+      const char* day_names[] = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"};
+
+      // Calculate today index (0=Mon, 1=Tue, ..., 6=Sun)
+      int today_idx = -1;
+      if (now.is_valid()) {
+        // ESPHome now.day_of_week: 1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri, 7=Sat
+        today_idx = (now.day_of_week + 5) % 7;
+      }
+
+      // ── Draw Day Column Headers (MON - SUN) ──
+      for (int d = 0; d < 7; d++) {
+        int cx = GRID_X + (d * COL_W);
+        bool is_today = (d == today_idx);
+
+        // High contrast column header boxes
+        Color header_bg = is_today ? RED : BLUE;
+        Color header_fg = WHITE;
+
+        it.filled_rectangle(cx + 1, HEADER_Y, COL_W - 2, HEADER_HEIGHT, header_bg);
+        it.rectangle(cx, HEADER_Y, COL_W, HEADER_HEIGHT, BLACK);
+
+        it.printf(cx + (COL_W / 2), HEADER_Y + (HEADER_HEIGHT / 2), id(font_day_header_bold),
+                  header_fg, TextAlign::CENTER, "%s", day_names[d]);
+
+        // Draw vertical grid line for column
+        it.line(cx, GRID_Y, cx, GRID_Y + GRID_H, BLACK);
+      }
+      // Right edge of grid
+      it.line(GRID_X + GRID_W, GRID_Y, GRID_X + GRID_W, GRID_Y + GRID_H, BLACK);
+
+      // ── Draw Hourly Time Axis (00:00 to 24:00) ──
+      int hour_steps[] = {0, 3, 6, 9, 12, 15, 18, 21, 24};
+      for (int h : hour_steps) {
+        int hy = GRID_Y + (int)(((float)h / 24.0f) * GRID_H);
+
+        // Time label on left
+        char h_buf[8];
+        snprintf(h_buf, sizeof(h_buf), "%02d:00", h);
+        it.printf(GRID_X - 6, hy, id(font_footer), BLACK,
+                  TextAlign::CENTER_RIGHT, "%s", h_buf);
+
+        // Horizontal grid line across days
+        if (h == 0 || h == 24) {
+          it.line(GRID_X, hy, GRID_X + GRID_W, hy, BLACK);
+        } else {
+          for (int x = GRID_X; x < GRID_X + GRID_W; x += 6) {
+            it.draw_pixel_at(x, hy, BLACK);
+          }
+        }
+      }
+
+      // ── Current Time Red Indicator Line ──
+      if (now.is_valid() && today_idx >= 0 && today_idx < 7) {
+        float now_hour = now.hour + (now.minute / 60.0f);
+        int ry = GRID_Y + (int)((now_hour / 24.0f) * GRID_H);
+        int today_cx = GRID_X + (today_idx * COL_W);
+
+        it.line(today_cx, ry - 1, today_cx + COL_W, ry - 1, RED);
+        it.line(today_cx, ry,     today_cx + COL_W, ry,     RED);
+        it.line(today_cx, ry + 1, today_cx + COL_W, ry + 1, RED);
+      }
+
+      // UTF-8 safe string truncation helper for Swedish titles (ÅÄÖåäö)
+      auto truncate_utf8 = [](const std::string &str, size_t max_chars) -> std::string {
+        size_t chars = 0;
+        size_t i = 0;
+        while (i < str.length() && chars < max_chars) {
+          uint8_t c = (uint8_t)str[i];
+          if ((c & 0x80) == 0) i += 1;
+          else if ((c & 0xE0) == 0xC0) i += 2;
+          else if ((c & 0xF0) == 0xE0) i += 3;
+          else if ((c & 0xF8) == 0xF0) i += 4;
+          else i += 1;
+          chars++;
+        }
+        if (i < str.length()) return str.substr(0, i) + "..";
+        return str;
+      };
+
+      // Format decimal hours (e.g. 9.5 -> "09:30")
+      auto format_time = [](float h_dec) -> std::string {
+        int h = (int)h_dec;
+        int m = (int)roundf((h_dec - h) * 60.0f);
+        if (m >= 60) { h += 1; m = 0; }
+        if (h > 24) h = 24;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+        return std::string(buf);
+      };
+
+      // ── Render Event Blocks (Multi-day Aware) ──
+      auto render_event_block = [&](const std::string &line) {
+        if (line.empty() || line == "unknown" || line == "unavailable") return;
+
+        std::vector<std::string> parts;
+        size_t start = 0;
+        size_t end = line.find('|');
+        while (end != std::string::npos) {
+          parts.push_back(line.substr(start, end - start));
+          start = end + 1;
+          end = line.find('|', start);
+        }
+        parts.push_back(line.substr(start));
+
+        if (parts.size() < 5) return;
+
+        std::string title = parts[0];
+        int start_day = 0;
+        int end_day = 0;
+        float start_h = 0.0f;
+        float end_h = 24.0f;
+        bool is_allday = false;
+
+        if (parts.size() >= 6) {
+          start_day = atoi(parts[1].c_str());
+          end_day = atoi(parts[2].c_str());
+          start_h = atof(parts[3].c_str());
+          end_h = atof(parts[4].c_str());
+          is_allday = (parts[5] == "1");
+        } else {
+          start_day = atoi(parts[1].c_str());
+          end_day = start_day;
+          start_h = atof(parts[2].c_str());
+          end_h = atof(parts[3].c_str());
+          is_allday = (parts[4] == "1");
+        }
+
+        if (start_day < 0 || start_day >= 7) return;
+        if (end_day < start_day) end_day = start_day;
+        if (end_day >= 7) end_day = 6;
+
+        Color bg_col = is_allday ? GREEN : BLUE;
+        Color text_col = WHITE;
+
+        if (is_allday) {
+          // Continuous multi-day bar across all spanned columns
+          int span = (end_day - start_day) + 1;
+          int bx = GRID_X + (start_day * COL_W) + 2;
+          int bw = (span * COL_W) - 4;
+
+          int by = GRID_Y + (int)((start_h / 24.0f) * GRID_H);
+          int bh = (int)(((end_h - start_h) / 24.0f) * GRID_H);
+          if (bh < 36) bh = 36;
+
+          it.filled_rectangle(bx, by, bw, bh, bg_col);
+          it.rectangle(bx, by, bw, bh, BLACK);
+
+          std::string short_title = truncate_utf8(title, 12 * span);
+          if (bh >= 48) {
+            it.printf(bx + (bw / 2), by + (bh / 2) - 8, id(font_event_small), text_col,
+                      TextAlign::CENTER, "%s", short_title.c_str());
+            it.printf(bx + (bw / 2), by + (bh / 2) + 10, id(font_footer), text_col,
+                      TextAlign::CENTER, "All day");
+          } else {
+            it.printf(bx + (bw / 2), by + (bh / 2), id(font_event_small), text_col,
+                      TextAlign::CENTER, "%s", short_title.c_str());
+          }
+        } else {
+          // Timed event (single or multi-day blocks)
+          for (int d = start_day; d <= end_day; d++) {
+            float cur_sh = (d == start_day) ? start_h : 0.0f;
+            float cur_eh = (d == end_day) ? end_h : 24.0f;
+
+            int bx = GRID_X + (d * COL_W) + 2;
+            int bw = COL_W - 4;
+
+            int by = GRID_Y + (int)((cur_sh / 24.0f) * GRID_H);
+            int bh = (int)(((cur_eh - cur_sh) / 24.0f) * GRID_H);
+            if (bh < 36) bh = 36;
+
+            it.filled_rectangle(bx, by, bw, bh, bg_col);
+            it.rectangle(bx, by, bw, bh, BLACK);
+
+            std::string time_str = format_time(cur_sh) + "-" + format_time(cur_eh);
+            std::string short_title = truncate_utf8(title, 8);
+
+            if (bh >= 56) {
+              // Tall block: title on top line, time below
+              it.printf(bx + (bw / 2), by + (bh / 2) - 10, id(font_event_small), text_col,
+                        TextAlign::CENTER, "%s", short_title.c_str());
+              it.printf(bx + (bw / 2), by + (bh / 2) + 10, id(font_footer), text_col,
+                        TextAlign::CENTER, "%s", time_str.c_str());
+            } else {
+              // Short block: time on top, title below (always visible)
+              it.printf(bx + (bw / 2), by + 2, id(font_footer), text_col,
+                        TextAlign::TOP_CENTER, "%s", time_str.c_str());
+              it.printf(bx + (bw / 2), by + 18, id(font_footer), text_col,
+                        TextAlign::TOP_CENTER, "%s", short_title.c_str());
+            }
+          }
+        }
+      };
+
+      esphome::text_sensor::TextSensor* cal_sensors[] = {
+        id(cal_line1), id(cal_line2), id(cal_line3), id(cal_line4),
+        id(cal_line5), id(cal_line6), id(cal_line7), id(cal_line8)
+      };
+      for (int i = 0; i < 8; i++) {
+        render_event_block(cal_sensors[i]->state);
+      }
+
+      // ════════════════════════════════════════════════════════════════════
+      //  WEATHER SECTION — Right side
+      // ════════════════════════════════════════════════════════════════════
+      int wx = W - WEATHER_W - MARGIN;
+      int wy = CONTENT_TOP;
+
+      // Vertical separator
+      it.line(wx - 10, CONTENT_TOP, wx - 10, H - FOOTER_H - MARGIN, BLACK);
+      it.line(wx - 9, CONTENT_TOP, wx - 9, H - FOOTER_H - MARGIN, BLACK);
+
+      // ── Current Weather (large) ──
+      it.printf(wx + WEATHER_W / 2, wy, id(font_header), BLACK,
+                TextAlign::TOP_CENTER, "Weather");
+      wy += 48;
+
+      // Weather icon (large)
+      auto get_weather_icon = [](const std::string &cond) -> std::string {
+        if (cond == "sunny")            return "\U000F0597";
+        if (cond == "clear-night")      return "\U000F0594";
+        if (cond == "partlycloudy")     return "\U000F0595";
+        if (cond == "cloudy")           return "\U000F0590";
+        if (cond == "rainy")            return "\U000F0596";
+        if (cond == "pouring")          return "\U000F0596";
+        if (cond == "snowy")            return "\U000F0598";
+        if (cond == "snowy-rainy")      return "\U000F067F";
+        if (cond == "fog")              return "\U000F0591";
+        if (cond == "hail")             return "\U000F0592";
+        if (cond == "lightning")        return "\U000F0593";
+        if (cond == "lightning-rainy")  return "\U000F067E";
+        if (cond == "windy" || cond == "windy-variant") return "\U000F059D";
+        if (cond == "thunderstorm")     return "\U000F0593";
+        return "\U000F0590";  // default: cloudy
+      };
+
+      // Condition name, prettified
+      auto pretty_condition = [](const std::string &cond) -> std::string {
+        if (cond == "sunny")            return "Sunny";
+        if (cond == "clear-night")      return "Clear";
+        if (cond == "partlycloudy")     return "Partly Cloudy";
+        if (cond == "cloudy")           return "Cloudy";
+        if (cond == "rainy")            return "Rainy";
+        if (cond == "pouring")          return "Heavy Rain";
+        if (cond == "snowy")            return "Snowy";
+        if (cond == "snowy-rainy")      return "Sleet";
+        if (cond == "fog")              return "Foggy";
+        if (cond == "hail")             return "Hail";
+        if (cond == "lightning")        return "Lightning";
+        if (cond == "lightning-rainy")  return "Thunderstorm";
+        if (cond == "windy")            return "Windy";
+        if (cond == "windy-variant")    return "Windy";
+        if (cond == "thunderstorm")     return "Thunderstorm";
+        if (cond == "exceptional")      return "Exceptional";
+        return cond;
+      };
+
+      std::string cond = id(ha_weather_condition).state;
+      std::string icon = get_weather_icon(cond);
+
+      // Large weather icon
+      it.printf(wx + WEATHER_W / 2, wy + 5, id(mdi_large), BLUE,
+                TextAlign::TOP_CENTER, "%s", icon.c_str());
+      wy += 85;
+
+      // Large temperature
+      if (!std::isnan(id(ha_weather_temp).state)) {
+        it.printf(wx + WEATHER_W / 2, wy, id(font_weather_temp), BLACK,
+                  TextAlign::TOP_CENTER, "%.0f°C", id(ha_weather_temp).state);
+      } else {
+        it.printf(wx + WEATHER_W / 2, wy, id(font_weather_temp), BLACK,
+                  TextAlign::TOP_CENTER, "--°C");
+      }
+      wy += 75;
+
+      // Condition text
+      it.printf(wx + WEATHER_W / 2, wy, id(font_weather_cond), GREEN,
+                TextAlign::TOP_CENTER, "%s", pretty_condition(cond).c_str());
+      wy += 34;
+
+      // Humidity & wind on one line
+      char hw_buf[64] = "";
+      float hum = id(ha_weather_humidity).state;
+      float wind = id(ha_weather_wind).state;
+      if (!std::isnan(hum) && !std::isnan(wind)) {
+        snprintf(hw_buf, sizeof(hw_buf), "Hum: %.0f%%  |  Wind: %.0f km/h", hum, wind);
+      } else if (!std::isnan(hum)) {
+        snprintf(hw_buf, sizeof(hw_buf), "Humidity: %.0f%%", hum);
+      } else if (!std::isnan(wind)) {
+        snprintf(hw_buf, sizeof(hw_buf), "Wind: %.0f km/h", wind);
+      }
+      if (strlen(hw_buf) > 0) {
+        it.printf(wx + WEATHER_W / 2, wy, id(font_footer), BLACK,
+                  TextAlign::TOP_CENTER, "%s", hw_buf);
+        wy += 26;
+      }
+
+      wy += 8;
+      // Divider
+      it.line(wx + 20, wy, wx + WEATHER_W - 20, wy, Color(200, 200, 200));
+      wy += 15;
+
+      // ── Forecast: next 2 days (small panels side by side) ──
+      it.printf(wx + WEATHER_W / 2, wy, id(font_day_header_bold), BLACK,
+                TextAlign::TOP_CENTER, "Forecast");
+      wy += 36;  // Pushed down so box doesn't intersect header!
+
+      // Parse forecast string: "Wed|sunny|25|18;Thu|cloudy|22|15;Fri|rainy|20|14"
+      std::string forecast_str = id(ha_weather_forecast).state;
+      if (!forecast_str.empty() && forecast_str != "unknown" && forecast_str != "unavailable") {
+        int panel_w = (WEATHER_W - 30) / 2;
+        int panel_idx = 0;
+
+        size_t start = 0;
+        while (start < forecast_str.length() && panel_idx < 2) {
+          size_t end = forecast_str.find(';', start);
+          if (end == std::string::npos) end = forecast_str.length();
+          std::string segment = forecast_str.substr(start, end - start);
+
+          // Parse: "Wed|sunny|25|18"
+          std::string f_day, f_cond, f_hi, f_lo;
+          size_t s1 = segment.find('|');
+          if (s1 != std::string::npos) {
+            f_day = segment.substr(0, s1);
+            size_t s2 = segment.find('|', s1 + 1);
+            if (s2 != std::string::npos) {
+              f_cond = segment.substr(s1 + 1, s2 - s1 - 1);
+              size_t s3 = segment.find('|', s2 + 1);
+              if (s3 != std::string::npos) {
+                f_hi = segment.substr(s2 + 1, s3 - s2 - 1);
+                f_lo = segment.substr(s3 + 1);
+              }
+            }
+          }
+
+          // Skip first entry if start == 0
+          if (panel_idx == 0 && start == 0) {
+            start = end + 1;
+            continue;
+          }
+
+          int px = wx + 10 + (panel_idx * (panel_w + 10));
+          int py = wy;
+
+          // Panel background
+          it.filled_rectangle(px, py, panel_w, 145, Color(245, 245, 245));
+          it.rectangle(px, py, panel_w, 145, BLACK);
+
+          // Day name header
+          it.filled_rectangle(px + 1, py + 1, panel_w - 2, 30, BLUE);
+          it.printf(px + panel_w / 2, py + 15, id(font_day_header_bold), WHITE,
+                    TextAlign::CENTER, "%s", f_day.c_str());
+
+          // Weather icon
+          std::string f_icon = get_weather_icon(f_cond);
+          it.printf(px + panel_w / 2, py + 38, id(mdi_small), BLUE,
+                    TextAlign::TOP_CENTER, "%s", f_icon.c_str());
+
+          // Hi / Lo temps (High in RED, Low in BLACK)
+          char temp_hi_buf[16], temp_lo_buf[16];
+          snprintf(temp_hi_buf, sizeof(temp_hi_buf), "%s°", f_hi.c_str());
+          snprintf(temp_lo_buf, sizeof(temp_lo_buf), "%s°", f_lo.c_str());
+
+          it.printf(px + (panel_w / 2) - 22, py + 92, id(font_weather_small), RED,
+                    TextAlign::TOP_CENTER, "%s", temp_hi_buf);
+          it.printf(px + (panel_w / 2) + 22, py + 92, id(font_weather_small), BLACK,
+                    TextAlign::TOP_CENTER, "%s", temp_lo_buf);
+
+          // Condition label
+          it.printf(px + panel_w / 2, py + 120, id(font_footer), BLACK,
+                    TextAlign::TOP_CENTER, "%s",
+                    pretty_condition(f_cond).substr(0, 10).c_str());
+
+          panel_idx++;
+          start = end + 1;
+        }
+        wy += 155;
+      } else {
+        it.printf(wx + WEATHER_W / 2, wy + 20, id(font_weather_small), BLACK,
+                  TextAlign::TOP_CENTER, "Forecast unavailable");
+        wy += 50;
+      }
+
+      wy += 10;
+      // Divider
+      it.line(wx + 20, wy, wx + WEATHER_W - 20, wy, RED);
+      wy += 15;
+
+      // ── COUNTDOWN SECTION — Important Days ──
+      it.printf(wx + WEATHER_W / 2, wy, id(font_day_header_bold), BLACK,
+                TextAlign::TOP_CENTER, "Countdowns");
+      wy += 36;
+
+      // Helper: calculate days remaining until target month/day
+      auto days_until = [](const ESPTime &now_time, int target_m, int target_d) -> int {
+        if (!now_time.is_valid()) return 0;
+        int cur_y = now_time.year;
+
+        struct tm target_tm = {};
+        target_tm.tm_year = cur_y - 1900;
+        target_tm.tm_mon  = target_m - 1;
+        target_tm.tm_mday = target_d;
+        target_tm.tm_hour = 0;
+        target_tm.tm_min  = 0;
+        target_tm.tm_sec  = 0;
+
+        time_t t_target = mktime(&target_tm);
+        time_t t_now = now_time.timestamp;
+
+        if (t_target < t_now - 86400) {
+          target_tm.tm_year += 1;
+          t_target = mktime(&target_tm);
+        }
+
+        double diff = difftime(t_target, t_now);
+        int days = (int)ceil(diff / 86400.0);
+        return days < 0 ? 0 : days;
+      };
+
+      struct CountdownItem {
+        const char* title;
+        int month;
+        int day;
+        const char* icon;
+        Color col;
+      };
+
+      CountdownItem items[] = {
+        {"First Date",    7,  30, "\U000F02D1", RED},     // Heart (F02D1)
+        {"Amelie's Bday", 12, 29, "\U000F00E9", RED},      // Cake (F00E9)
+        {"Ehab's Bday",   7,  23, "\U000F00EB", BLUE},    // Gift (F00EB)
+        {"Halloween",     10, 31, "\U000F0BA3", RED},     // Pumpkin (F0BA3)
+        {"Christmas",     12, 24, "\U000F0405", GREEN}  // Tree (F0405)
+      };
+
+      for (int i = 0; i < 5; i++) {
+        int days_left = days_until(now, items[i].month, items[i].day);
+
+        int card_x = wx + 10;
+        int card_w = WEATHER_W - 20;
+        int card_h = 38;
+        int card_y = wy + (i * 44);
+
+        // Container box
+        it.filled_rectangle(card_x, card_y, card_w, card_h, Color(248, 248, 248));
+        it.rectangle(card_x, card_y, card_w, card_h, BLACK);
+
+        // Left accent bar
+        it.filled_rectangle(card_x + 1, card_y + 1, 6, card_h - 2, items[i].col);
+
+        // MDI Icon
+        it.printf(card_x + 18, card_y + 5, id(mdi_calendar), items[i].col,
+                  TextAlign::TOP_LEFT, "%s", items[i].icon);
+
+        // Event Title
+        it.printf(card_x + 55, card_y + (card_h / 2), id(font_event_small), BLACK,
+                  TextAlign::CENTER_LEFT, "%s", items[i].title);
+
+        // Days Remaining Badge
+        char badge_buf[32];
+        if (days_left == 0) {
+          snprintf(badge_buf, sizeof(badge_buf), "TODAY!");
+        } else if (days_left == 1) {
+          snprintf(badge_buf, sizeof(badge_buf), "1 day");
+        } else {
+          snprintf(badge_buf, sizeof(badge_buf), "%d days", days_left);
+        }
+
+        it.printf(card_x + card_w - 12, card_y + (card_h / 2), id(font_day_header_bold),
+                  items[i].col, TextAlign::CENTER_RIGHT, "%s", badge_buf);
+      }
+
+      // ════════════════════════════════════════════════════════════════════
+      //  FOOTER BAR
+      // ════════════════════════════════════════════════════════════════════
+      int fy = H - FOOTER_H - MARGIN + 5;
+      it.line(MARGIN, fy, W - MARGIN, fy, BLACK);
+      fy += 8;
+
+      if (now.is_valid()) {
+        char footer_buf[64];
+        snprintf(footer_buf, sizeof(footer_buf), "Last updated: %02d:%02d",
+                 now.hour, now.minute);
+        it.printf(W - MARGIN, fy, id(font_footer), BLACK,
+                  TextAlign::TOP_RIGHT, "%s", footer_buf);
+      }
+
+      // Battery status indicator in footer
+      float bat_pct = id(battery_percentage).state;
+      float bat_v   = id(battery_voltage).state;
+      bool is_charging = id(battery_charging).state;
+      if (!std::isnan(bat_pct) && bat_pct >= 0) {
+        Color bat_color = is_charging ? GREEN : (bat_pct < 20.0f ? RED : (bat_pct < 40.0f ? YELLOW : GREEN));
+
+        char bat_buf[64];
+        if (is_charging) {
+          snprintf(bat_buf, sizeof(bat_buf), "ePaper Calendar  |  Battery: %.0f%% (%.2fV) CHARGING ", bat_pct, bat_v);
+          it.printf(MARGIN, fy, id(font_footer), bat_color, TextAlign::TOP_LEFT, "%s", bat_buf);
+          it.printf(MARGIN + 460, fy - 4, id(mdi_calendar), GREEN, TextAlign::TOP_LEFT, "\U000F0820");
+        } else if (!std::isnan(bat_v) && bat_v > 0) {
+          snprintf(bat_buf, sizeof(bat_buf), "ePaper Calendar  |  Battery: %.0f%% (%.2fV)", bat_pct, bat_v);
+          it.printf(MARGIN, fy, id(font_footer), bat_color, TextAlign::TOP_LEFT, "%s", bat_buf);
+        } else {
+          snprintf(bat_buf, sizeof(bat_buf), "ePaper Calendar  |  Battery: %.0f%%", bat_pct);
+          it.printf(MARGIN, fy, id(font_footer), bat_color, TextAlign::TOP_LEFT, "%s", bat_buf);
+        }
+      } else {
+        it.printf(MARGIN, fy, id(font_footer), GREEN,
+                  TextAlign::TOP_LEFT, "ePaper Calendar Dashboard");
+      }
+
+# ── Binary Sensors ──
+binary_sensor:
+  - platform: template
+    name: "ePaper Battery Charging"
+    id: battery_charging
+    device_class: battery_charging
+    lambda: |-
+      // Charging detection: when USB is connected, the charger IC raises
+      // the battery terminal voltage above its open-circuit voltage.
+      // A fully-charged resting LiPo sits at ~4.15V. With USB connected
+      // and charger active, terminal voltage is pushed to 4.20-4.25V+.
+      // Threshold at 4.25V catches active charging at high SoC.
+      // Note: for reliable detection at all charge levels, monitor the
+      // 5V rail with a voltage divider on a free GPIO (hardware mod).
+      if (!id(battery_voltage).has_state()) return false;
+      float v = id(battery_voltage).state;
+      return v > 4.25f;
+  - platform: gpio
+    pin:
+      number: GPIO3
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Button D2"
+    id: btn_d2
+    on_press:
+      then:
+        - logger.log: "Button D2 pressed — Refreshing display!"
+        - component.update: epaper_display
+
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Button D4"
+    id: btn_d4
+    on_press:
+      then:
+        - logger.log: "Button D4 pressed — Refreshing display!"
+        - component.update: epaper_display
+
+# ── Buttons exposed to HA ──
+button:
+  - platform: restart
+    name: "Restart ePaper"
+
+  - platform: template
+    name: "Refresh Display"
+    id: refresh_display_button
+    icon: "mdi:refresh"
+    on_press:
+      then:
+        - logger.log: "Refresh button pressed in Home Assistant"
+        - component.update: epaper_display
+
+# ── Deep Sleep Control ──
+deep_sleep:
+  id: deep_sleep_control
+  run_duration: 90s
+  sleep_duration: 6h
+  wakeup_pin:
+    number: GPIO2
+    inverted: true
+    mode:
+      input: true
+      pullup: true
+
