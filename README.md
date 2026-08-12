@@ -8,11 +8,11 @@ This repository contains the configuration, automation, and documentation files 
 
 This workspace contains configurations for two primary hardware setups:
 
-### 1. [WaveShare P4 Touch LCD 4C — "Ivy" AI Screen](file:///home/eok/src/home-assistant/docs/ivy-voice-assistant.md)
+### 1. [WaveShare P4 Touch LCD 4C — "Friday" AI Screen](file:///home/eok/src/home-assistant/docs/ha-friday.md)
 * **Hardware**: Waveshare ESP32-P4 Wi-Fi6 Touch LCD 3.4C.
-* **Features**: Full voice-assistant (Home Assistant Assist) with dual wake-word support, a media player with hardware acoustic echo cancellation (AEC), and an animated LVGL UI featuring an avatar ("Ivy"), weather, and clock displays.
-* **Config**: [waveshare-p4-touch-lcd-4c-ai-ivy.yaml](file:///home/eok/src/home-assistant/esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml).
-* **Documentation**: See [Ivy Voice Assistant UI Documentation](file:///home/eok/src/home-assistant/docs/ivy-voice-assistant.md) for features, boot sequence details, and key tunable constants.
+* **Features**: Full voice-assistant (Home Assistant Assist) with dual wake-word support, a media player with hardware acoustic echo cancellation (AEC), and an animated LVGL UI featuring an avatar ("Friday"), weather, and clock displays.
+* **Config**: [ha-friday.yaml](file:///home/eok/src/home-assistant/esphome-config/ha-friday.yaml).
+* **Documentation**: See [Friday Voice Assistant UI Documentation](file:///home/eok/src/home-assistant/docs/ha-friday.md) for features, boot sequence details, and key tunable constants.
 
 ### 2. [ePaper Calendar + Weather Dashboard](file:///home/eok/src/home-assistant/docs/epaper-calendar-dashboard.md)
 * **Hardware**: Seeed Studio XIAO ESP32-S3 + EE02 Driver Board + 13.3" Spectra 6 Display.
@@ -27,10 +27,10 @@ This workspace contains configurations for two primary hardware setups:
 ```
 .
 ├── docs/                             ← Detailed documentation folder
-│   ├── ivy-voice-assistant.md        ← Ivy AI Screen Voice Satellite guide
+│   ├── ha-friday.md                  ← Friday AI Screen Voice Satellite guide
 │   └── epaper-calendar-dashboard.md  ← ePaper Calendar Dashboard guide
 ├── esphome-config/                   ← ESPHome configuration mount
-│   ├── waveshare-p4-...-ivy.yaml     ← Ivy voice assistant device configuration
+│   ├── ha-friday.yaml                ← Friday voice assistant device configuration
 │   ├── epaper-calendar.yaml          ← ePaper calendar device configuration
 │   └── secrets.yaml                  ← Device WiFi / API keys (gitignored)
 ├── ha-config/                        ← Home Assistant configuration mount
@@ -66,9 +66,9 @@ docker compose logs -f homeassistant
 
 To compile and upload configurations to your ESPHome devices, run commands inside the ESPHome container:
 
-* **Ivy Voice Assistant LCD**:
+* **Friday Voice Assistant LCD**:
   ```bash
-  docker compose exec esphome esphome run esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml
+  docker compose exec esphome esphome run esphome-config/ha-friday.yaml
   ```
 * **ePaper Calendar Display**:
   ```bash
