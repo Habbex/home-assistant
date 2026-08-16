@@ -23,8 +23,10 @@
       target:
         entity_id: calendar.familj
       data:
-        duration:
-          days: 7
+        start_date_time: >
+          {{ today_at('00:00:00') - timedelta(days=(now().weekday())) }}
+        end_date_time: >
+          {{ today_at('00:00:00') - timedelta(days=(now().weekday())) + timedelta(days=7) }}
       response_variable: cal_response
     - action: weather.get_forecasts
       target:
