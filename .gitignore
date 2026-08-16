@@ -16,9 +16,7 @@ config/
 
 # ESPHome & PlatformIO build / toolchain artifacts
 .esphome/
-esphome-config/.esphome/
-esphome-config/.platformio/
-esphome-config/.device-builder*
+.platformio/
 .device-builder*
 .pio/
 .pioenvs/

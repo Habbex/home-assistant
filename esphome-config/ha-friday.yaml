@@ -196,16 +196,24 @@ switch:
     restore_mode: ALWAYS_ON
 
   - platform: template
-    name: "Enable Wake Word"
-    id: wake_word_toggle
+    name: "Mute Microphone"
+    id: mic_mute_toggle
+    icon: "mdi:microphone-off"
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
+    restore_mode: RESTORE_DEFAULT_OFF
+    # ON = muted (mic disabled), OFF = unmuted (mic active).
+    # Stops wake-word detection and aborts any in-flight VA cycle.
+    # With both MWW and VA stopped, no audio is processed even though
+    # the mic hardware stays powered (esp_audio_stack manages mic
+    # lifecycle internally and does not support direct stop/start).
     turn_on_action:
-      - micro_wake_word.start
-      - logger.log: "Wake word ENABLED via Home Assistant"
-    turn_off_action:
       - micro_wake_word.stop
-      - logger.log: "Wake word MUTED via Home Assistant"
+      - voice_assistant.stop:
+          id: va_engine
+      - logger.log: "Microphone MUTED via Home Assistant"
+    turn_off_action:
+      - micro_wake_word.start
+      - logger.log: "Microphone UNMUTED via Home Assistant"
 
 external_components:
   # Pinned to v2026.6.2 (June 7, 2026): GMF audio stack migration —
@@ -446,22 +454,33 @@ media_player:
 # firing so TTS playback can't re-trigger it through the pre-AEC mic. We
 # restart it from voice_assistant.on_end / on_error.
 #
-# probability_cutoff: 0.55 — balanced to catch natural speech at room distance
-#   while rejecting TV noise. Lower to 0.50 if still missing wake words,
-#   raise to 0.60 if TV false-triggers return.
-# sliding_window_size: 5 — model must sustain >55% for 5 frames (~100 ms).
-#   Raise to 6 or 7 if false-triggers on music/TV persist.
+# VAD: Voice Activity Detection model pre-filters audio before the wake
+#   word model runs. Without VAD, TV dialog/music generates false triggers
+#   because the wake word NN evaluates every frame. With VAD, non-speech
+#   frames are discarded before they reach the wake word model.
+#
+# gain_factor: 3 — the ES7210 hardware codec already provides 24 dB gain.
+#   Previous value of 10 over-amplified TV audio and background noise,
+#   causing both false triggers and saturated wake word model inputs.
+#   Lower to 2 if TV false-triggers persist, raise to 4 if voice is missed.
+#
+# probability_cutoff: 0.58 — with VAD handling noise rejection, the cutoff
+#   can be slightly relaxed vs the previous 0.65 which missed real speech.
+#   Raise to 0.62 if false triggers return, lower to 0.55 if still missing.
+# sliding_window_size: 5 — model must sustain >58% for 5 frames (~100 ms).
+#   Standard recommendation; previous 6 was too strict with the high cutoff.
 micro_wake_word:
   id: my_wake_word
   task_stack_in_psram: false
   microphone:
     microphone: mic_aec
-    gain_factor: "10"
+    gain_factor: "3"
   models:
     - model: https://raw.githubusercontent.com/JohnnyPrimus/Custom_V2_MicroWakeWords/refs/heads/main/models/hey_friday/hey_friday.json
       id: hey_friday_model
-      probability_cutoff: 0.65
-      sliding_window_size: 6
+      probability_cutoff: 0.58
+      sliding_window_size: 5
+  vad:
   on_wake_word_detected:
     - light.turn_on: screen_backlight
     - script.execute: screen_idle_timer
@@ -482,21 +501,23 @@ globals:
     initial_value: '0'
 
 # ---- Voice Assistant ----
-# noise_suppression_level: 2 — moderate WebRTC NS; level 3-4 was too
-# aggressive and caused STT truncation (trailing syllables gated out).
-# The esp_aec at sr_low_cost already handles echo; high NS on top fights it.
-# volume_multiplier: 2.0 — auto_gain at 31dBFS handles dynamic
-# normalization; a lower fixed multiplier avoids amplifying noise equally.
+# noise_suppression_level: 1 — light WebRTC NS; level 2+ adds per-frame
+# processing overhead and is redundant with esp_aec at sr_low_cost.
+# Level 3-4 was too aggressive and caused STT truncation.
+# volume_multiplier: 1.5 — lower multiplier lets VAD detect end-of-speech
+# faster; auto_gain at 31dBFS handles dynamic normalization.
+# gain_factor: 5 — reduced from 10 to prevent STT clipping; the ES7210
+# hardware codec already applies 24 dB gain.
 voice_assistant:
   id: va_engine
   microphone:
     microphone: mic_aec
-    gain_factor: 10
+    gain_factor: 5
   micro_wake_word: my_wake_word
   media_player: board_player
-  noise_suppression_level: 2
+  noise_suppression_level: 1
   auto_gain: 31dBFS
-  volume_multiplier: 2.0
+  volume_multiplier: 1.5
   # Retain conversation context (conversation ID) for 5 minutes so
   # follow-up commands share context with the original ("turn on the
   # kitchen light" → "now dim it to 50%").
@@ -504,8 +525,12 @@ voice_assistant:
 
   on_client_connected:
     # MWW is what we actually need running for wake-word; ensure it is up
-    # after an HA reconnect. Idempotent if already running.
-    - micro_wake_word.start
+    # after an HA reconnect. Skip if the mic is muted.
+    - if:
+        condition:
+          lambda: 'return !id(mic_mute_toggle).state;'
+        then:
+          - micro_wake_word.start
 
   on_client_disconnected:
     - script.execute:
@@ -574,14 +599,23 @@ voice_assistant:
         format: "VA cycle end — free heap: %u  free PSRAM: %u"
         args: ["esp_get_free_heap_size()", "heap_caps_get_free_size(MALLOC_CAP_SPIRAM)"]
         level: INFO
+    # Short wait for TTS playback to finish — 2s timeout instead of 10s
+    # to avoid blocking the return-to-idle path. AEC handles any residual
+    # speaker output so MWW won't false-trigger.
     - wait_until:
         condition:
           lambda: 'return id(board_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;'
-        timeout: 10s
-    # Small settle delay before restarting MWW — lets audio buffers drain
-    # so MWW doesn't pick up tail-end speaker output as a false trigger.
-    - delay: 200ms
-    - micro_wake_word.start
+        timeout: 2s
+    # Settle delay before restarting MWW — lets AEC reference buffer and
+    # audio buffers fully drain so MWW doesn't pick up tail-end speaker
+    # output as a false trigger. 500ms (up from 200ms) gives more margin
+    # for the AEC to converge back to silence.
+    - delay: 500ms
+    - if:
+        condition:
+          lambda: 'return !id(mic_mute_toggle).state;'
+        then:
+          - micro_wake_word.start
     - script.execute: screen_idle_timer
     - script.execute:
         id: set_anim_state
@@ -601,7 +635,11 @@ voice_assistant:
       # the delay, MWW can start in a broken listen state (race condition).
       - micro_wake_word.stop
       - delay: 500ms
-      - micro_wake_word.start
+      - if:
+          condition:
+            lambda: 'return !id(mic_mute_toggle).state;'
+          then:
+            - micro_wake_word.start
       - script.execute:
           id: set_anim_state
           target_state: 0
