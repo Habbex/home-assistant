@@ -2,7 +2,7 @@
 
 ## Context
 
-The user has a Waveshare P4 Touch LCD AI device running ESPHome ([esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml)) acting as a Home Assistant voice satellite with an LVGL UI ("Ivy" assistant + clock/weather + Now Playing screen). After a previous round of changes, five regressions/limitations remain:
+The user has a Waveshare P4 Touch LCD AI device running ESPHome ([esphome-config/ha-friday.yaml](esphome-config/ha-friday.yaml)) acting as a Home Assistant voice satellite with an LVGL UI ("Friday" assistant + clock/weather + Now Playing screen). After a previous round of changes, five regressions/limitations remain:
 
 1. **Wake word is unreliable** — sometimes responds, sometimes ignores wake words
 2. **Weather doesn't show** — user's HA entity is `weather.forecast_home`, but config still references `weather.home` for temperature
@@ -16,7 +16,7 @@ The plan below addresses each issue with the minimum diff to the existing YAML a
 
 ## Critical files
 
-- [esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml) — single file, all changes happen here
+- [esphome-config/ha-friday.yaml](esphome-config/ha-friday.yaml) — single file, all changes happen here
 
 No other files need to be touched. The archive YAML in `esphome-config/archive/` is unrelated.
 
@@ -24,7 +24,7 @@ No other files need to be touched. The archive YAML in `esphome-config/archive/`
 
 ## Fix 1 — Weather entity ID (quick win, do first)
 
-**Problem:** [esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml:250](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L250) sets `ha_temperature` to `entity_id: weather.home`. The user's actual HA entity is `weather.forecast_home`. The icon (`ha_weather_condition`) on [line 289](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L289) is already correct, which is why some weather data may have appeared and other parts didn't.
+**Problem:** [esphome-config/ha-friday.yaml:250](esphome-config/ha-friday.yaml#L250) sets `ha_temperature` to `entity_id: weather.home`. The user's actual HA entity is `weather.forecast_home`. The icon (`ha_weather_condition`) on [line 289](esphome-config/ha-friday.yaml#L289) is already correct, which is why some weather data may have appeared and other parts didn't.
 
 **Change:**
 ```yaml
@@ -43,8 +43,8 @@ That's it for weather. Both temperature (attribute) and condition (state) come f
 
 **Root cause (two separate issues feeding each other):**
 
-1. `micro_wake_word` listens on **`mic_raw`** ([line 398](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L398)) — the *pre-AEC* mic. With music playing through the speaker, the raw mic picks up the speaker output → false triggers → the existing comment block on line 327–330 explains this is exactly why wake word has to be **stopped** during music.
-2. After every interaction, `restart_wakeword_safely` ([line 737](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L737)) waits **4 seconds** before re-enabling wake word. During those 4 s the device is deaf to the wake word. Combined with the `on_end` 800 ms pre-delay ([line 539](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L539)), the user has a ~5 s blind window after every reply.
+1. `micro_wake_word` listens on **`mic_raw`** ([line 398](esphome-config/ha-friday.yaml#L398)) — the *pre-AEC* mic. With music playing through the speaker, the raw mic picks up the speaker output → false triggers → the existing comment block on line 327–330 explains this is exactly why wake word has to be **stopped** during music.
+2. After every interaction, `restart_wakeword_safely` ([line 737](esphome-config/ha-friday.yaml#L737)) waits **4 seconds** before re-enabling wake word. During those 4 s the device is deaf to the wake word. Combined with the `on_end` 800 ms pre-delay ([line 539](esphome-config/ha-friday.yaml#L539)), the user has a ~5 s blind window after every reply.
 
 **Change A — switch wake word to the AEC-cleaned mic stream:**
 ```yaml
@@ -75,10 +75,10 @@ The AEC pipeline (`esp_aec` block at line 151) already cancels speaker echo. Rou
 ```
 
 **Change C — keep wake word running during music (now safe with AEC):**
-Remove the `safe_wake_word_stop` from `on_play` ([line 339](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L339)). With AEC cancelling speaker output from the mic stream, music spill no longer triggers the wake word.
+Remove the `safe_wake_word_stop` from `on_play` ([line 339](esphome-config/ha-friday.yaml#L339)). With AEC cancelling speaker output from the mic stream, music spill no longer triggers the wake word.
 
 **Change D — slight cutoff bump for safety once AEC is on the wake-word path:**
-Raise `probability_cutoff` from `0.38` → `0.42` for both models and VAD ([line 403, 406, 410](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L403)). With AEC-cleaned audio the SNR is better, so a slightly higher cutoff still triggers reliably but rejects more music/speech background. **Tune this last** — if wake word becomes harder to trigger, drop back to 0.40.
+Raise `probability_cutoff` from `0.38` → `0.42` for both models and VAD ([line 403, 406, 410](esphome-config/ha-friday.yaml#L403)). With AEC-cleaned audio the SNR is better, so a slightly higher cutoff still triggers reliably but rejects more music/speech background. **Tune this last** — if wake word becomes harder to trigger, drop back to 0.40.
 
 ---
 
@@ -89,9 +89,9 @@ Cumulative latency budget today vs. after:
 | Phase | Current | Target | Notes |
 |---|---|---|---|
 | Boot delays (lines 11, 19, 27, 38, 45) | ~5.0 s | ~2.5 s | Cosmetic LVGL transitions only — halve them all |
-| Wake-word → VA listening ([427, 438](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L427)) | 1200 ms drain + 200 ms = **1.4 s** | 600 ms + 100 ms = **0.7 s** | The 1200 ms drain was for SDIO bus stability when stopping a *playing* media stream; 600 ms is the sweet spot per ESPHome speaker-media-player issue threads |
-| VA end → wake word ([539](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L539), [740](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L740)) | 800 ms + 4000 ms = **4.8 s** | 300 ms + 1000 ms = **1.3 s** | Already covered above |
-| `pipeline_watchdog` ([765](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L765)) | 10 s | 6 s | STT timeout — 10 s is conservative |
+| Wake-word → VA listening ([427, 438](esphome-config/ha-friday.yaml#L427)) | 1200 ms drain + 200 ms = **1.4 s** | 600 ms + 100 ms = **0.7 s** | The 1200 ms drain was for SDIO bus stability when stopping a *playing* media stream; 600 ms is the sweet spot per ESPHome speaker-media-player issue threads |
+| VA end → wake word ([539](esphome-config/ha-friday.yaml#L539), [740](esphome-config/ha-friday.yaml#L740)) | 800 ms + 4000 ms = **4.8 s** | 300 ms + 1000 ms = **1.3 s** | Already covered above |
+| `pipeline_watchdog` ([765](esphome-config/ha-friday.yaml#L765)) | 10 s | 6 s | STT timeout — 10 s is conservative |
 
 Concrete edits:
 
@@ -127,14 +127,14 @@ Boot is purely cosmetic (LVGL label updates) — no risk in trimming. The 600 ms
 > Source confirmed: `aioesphomeapi/state_log_formatter.py` (`_format_media_player`, lines 253–262 in v44.16.1) generates these from API entity-state messages received by the `esphome logs` viewer / dashboard. **No `logger:` setting on the device can suppress them** — the device just publishes the state, the viewer prints `[S]…`.
 >
 > Two ways to silence:
-> 1. **CLI viewer flag** (definitive): `esphome logs --no-states /config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml`. This sets `subscribe_states=False` so the dashboard never receives state updates to format. Confirmed in 2026.4.2 (`esphome/__main__.py`). The dashboard "Logs" tab does not currently expose a UI toggle, so use the CLI.
+> 1. **CLI viewer flag** (definitive): `esphome logs --no-states /config/ha-friday.yaml`. This sets `subscribe_states=False` so the dashboard never receives state updates to format. Confirmed in 2026.4.2 (`esphome/__main__.py`). The dashboard "Logs" tab does not currently expose a UI toggle, so use the CLI.
 > 2. **Reduce the *frequency* of state pushes** — every `media_player.volume_set` call publishes a new state, even when the value is unchanged. The original YAML called `volume_set` unconditionally in `on_idle`, `on_tts_start`, and `on_end`, producing an `[S]` block on every VA cycle. Wrapping each call in a `> 0.04` diff check (mirroring the slider on_value pattern) eliminates the redundant pushes. Also removed a duplicate unconditional `volume_set` at the top of `on_idle` that was followed by an identical conditional one.
 >
 > Both changes are now applied. The CLI flag is the final answer for users who don't want to see entity state in their logs at all; the diff checks reduce churn (and pointless work) even when the user *does* watch states.
 
 **Root cause (device-side, original analysis still valid):** Only `media_player: WARN` was filtered. Sibling component tags also need silencing — `audio`, `speaker_mixer` (note: actual tag is `speaker_mixer`, not `mixer_speaker`), `resampler_speaker`, `speaker_media_player`, plus the volume slider's `number` template fires INFO each time HA pushes a state update.
 
-**Change to the `logger:` block ([line 68](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L68)):**
+**Change to the `logger:` block ([line 68](esphome-config/ha-friday.yaml#L68)):**
 ```yaml
 logger:
   level: INFO
@@ -168,10 +168,10 @@ logger:
 ```
 
 **Also remove these always-on `logger.log:` calls** that fire on every interaction (replace with nothing — keep the surrounding action):
-- [line 332](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L332) `"Media player entered PLAYING"`
-- [line 364](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L364) `"Media player idle — restoring idle screen"`
-- [line 484, 488](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L484) VA connect/disconnect chatter
-- [line 498](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L498) `"Mic is listening"` (state animation already shows this)
+- [line 332](esphome-config/ha-friday.yaml#L332) `"Media player entered PLAYING"`
+- [line 364](esphome-config/ha-friday.yaml#L364) `"Media player idle — restoring idle screen"`
+- [line 484, 488](esphome-config/ha-friday.yaml#L484) VA connect/disconnect chatter
+- [line 498](esphome-config/ha-friday.yaml#L498) `"Mic is listening"` (state animation already shows this)
 
 Keep the diagnostic ones (`Wake word detected: X`, `STT heard: X`, `TTS text: X`, `VA error N: X`, watchdog fires).
 
@@ -180,8 +180,8 @@ Keep the diagnostic ones (`Wake word detected: X`, `STT heard: X`, `TTS text: X`
 ## Fix 5 — Pause music on wake word, resume on timeout
 
 **Current broken flow:**
-- Wake word → `media_player.stop` ([line 425](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L425)) — destroys the stream
-- `was_playing_media` global is *set* ([line 419](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L419)) but **never read** anywhere → music never resumes
+- Wake word → `media_player.stop` ([line 425](esphome-config/ha-friday.yaml#L425)) — destroys the stream
+- `was_playing_media` global is *set* ([line 419](esphome-config/ha-friday.yaml#L419)) but **never read** anywhere → music never resumes
 
 **Desired flow:**
 1. Wake word detected while music is playing → **pause** (not stop), remember it was playing
@@ -202,7 +202,7 @@ globals:
     initial_value: 'false'
 ```
 
-Set it true in `voice_assistant.on_stt_end` ([line 503](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L503)):
+Set it true in `voice_assistant.on_stt_end` ([line 503](esphome-config/ha-friday.yaml#L503)):
 ```yaml
 on_stt_end:
   - globals.set: { id: stt_fired_this_cycle, value: 'true' }
@@ -211,14 +211,14 @@ on_stt_end:
   ...
 ```
 
-Reset it in `voice_assistant.on_listening` ([line 497](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L497)) so each cycle starts clean:
+Reset it in `voice_assistant.on_listening` ([line 497](esphome-config/ha-friday.yaml#L497)) so each cycle starts clean:
 ```yaml
 on_listening:
   - globals.set: { id: stt_fired_this_cycle, value: 'false' }
   ...
 ```
 
-Change `on_wake_word_detected` to **pause** instead of **stop** ([line 425](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L425)):
+Change `on_wake_word_detected` to **pause** instead of **stop** ([line 425](esphome-config/ha-friday.yaml#L425)):
 ```yaml
 - if:
     condition:
@@ -229,7 +229,7 @@ Change `on_wake_word_detected` to **pause** instead of **stop** ([line 425](esph
       - delay: 600ms                        # was: 1200ms — covered in Fix 3
 ```
 
-Add resume logic in `voice_assistant.on_end` ([line 527](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L527)) — *before* the existing `set_anim_state target_state: 0`:
+Add resume logic in `voice_assistant.on_end` ([line 527](esphome-config/ha-friday.yaml#L527)) — *before* the existing `set_anim_state target_state: 0`:
 ```yaml
 on_end:
   - script.execute: screen_idle_timer
@@ -262,9 +262,9 @@ Verify `media_player.play` (with no `media_url`) actually resumes a paused strea
 
 User reported the Gemini-backed VA replies feel slow and not snappy. Three device-side levers (HA-side toggles separately):
 
-- **`announcement_pipeline` `format: FLAC` → `WAV`** ([line 362](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L362)). FLAC requires the ESP to decode before the first chunk plays; WAV is raw PCM and starts instantly. ~6× LAN bandwidth, but local network has plenty. ESPHome speaker-media-player docs explicitly recommend WAV at 16 kHz mono for fastest TTS startup.
-- **`noise_suppression_level: 4` → `2`** ([line 482](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L482)). NS:4 runs WebRTC at max, adding per-frame latency before audio reaches HA's STT. Since `mic_aec` already cancels speaker echo, NS:2 is enough — keeps room-noise gate without the latency hit.
-- **`pipeline_watchdog` `6s` → `12s`** ([line 779](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L779)). Watchdog runs between `on_stt_end` and `on_tts_start`, covering Gemini's "thinking" window. Gemini-flash typically responds in 2–5 s but can hit 6–10 s on cold cache. 6 s was killing slow responses; 12 s gives headroom without making real failures take forever.
+- **`announcement_pipeline` `format: FLAC` → `WAV`** ([line 362](esphome-config/ha-friday.yaml#L362)). FLAC requires the ESP to decode before the first chunk plays; WAV is raw PCM and starts instantly. ~6× LAN bandwidth, but local network has plenty. ESPHome speaker-media-player docs explicitly recommend WAV at 16 kHz mono for fastest TTS startup.
+- **`noise_suppression_level: 4` → `2`** ([line 482](esphome-config/ha-friday.yaml#L482)). NS:4 runs WebRTC at max, adding per-frame latency before audio reaches HA's STT. Since `mic_aec` already cancels speaker echo, NS:2 is enough — keeps room-noise gate without the latency hit.
+- **`pipeline_watchdog` `6s` → `12s`** ([line 779](esphome-config/ha-friday.yaml#L779)). Watchdog runs between `on_stt_end` and `on_tts_start`, covering Gemini's "thinking" window. Gemini-flash typically responds in 2–5 s but can hit 6–10 s on cold cache. 6 s was killing slow responses; 12 s gives headroom without making real failures take forever.
 
 **Server-side checklist (no YAML change, user verifies in HA):**
 - HA → Settings → Voice Assistants → pipeline → "Streaming responses" enabled (Voice Chapter 11 introduced this; ~10× lower perceived latency on long replies).
@@ -277,8 +277,8 @@ User reported the Gemini-backed VA replies feel slow and not snappy. Three devic
 
 Symptom: starting music sometimes reboots the device immediately. "Directly" + immediate failure points at memory pressure / PSRAM transaction error during the burst of MP3-decode + resample + I2S that all hit memory simultaneously on the first audio frame.
 
-- **`psram: speed: 200MHz` → `100MHz`** ([line 234](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L234)). Waveshare's reference configs ship at 200 MHz, but ESP-IDF's own docs warn 200 MHz PSRAM collides with the MPLL-sharing peripherals on ESP32-P4 ([esp-idf #17855](https://github.com/espressif/esp-idf/issues/17855)). 100 MHz is the documented middle option (ESPHome's `SPIRAM_SPEEDS` allow only `20 / 100 / 200` for ESP32-P4 — `120` is rejected by the validator). 100 MHz halves the chance of a PSRAM transaction error under burst load with negligible audio impact (16 kHz mono mix is well under the bandwidth budget).
-- **`buffer_size: 512000` → `256000`** ([line 340](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L340)). The speaker media player allocates the full buffer up-front; 512 KB plus the announcement pipeline plus AEC ref + mixer + decoder buffers can OOM on the first MP3 frame when PSRAM is also under stress. 256 KB still gives a few seconds of audio runway and keeps memory pressure off the critical path.
+- **`psram: speed: 200MHz` → `100MHz`** ([line 234](esphome-config/ha-friday.yaml#L234)). Waveshare's reference configs ship at 200 MHz, but ESP-IDF's own docs warn 200 MHz PSRAM collides with the MPLL-sharing peripherals on ESP32-P4 ([esp-idf #17855](https://github.com/espressif/esp-idf/issues/17855)). 100 MHz is the documented middle option (ESPHome's `SPIRAM_SPEEDS` allow only `20 / 100 / 200` for ESP32-P4 — `120` is rejected by the validator). 100 MHz halves the chance of a PSRAM transaction error under burst load with negligible audio impact (16 kHz mono mix is well under the bandwidth budget).
+- **`buffer_size: 512000` → `256000`** ([line 340](esphome-config/ha-friday.yaml#L340)). The speaker media player allocates the full buffer up-front; 512 KB plus the announcement pipeline plus AEC ref + mixer + decoder buffers can OOM on the first MP3 frame when PSRAM is also under stress. 256 KB still gives a few seconds of audio runway and keeps memory pressure off the critical path.
 - **(Already in place)** `mic_aec` for wake word + `safe_wake_word_stop` removed from `on_play` (Fix 2). This adds wake-word CPU during music; if Fix 7's two changes don't fully stop crashes, this is the next thing to roll back (revert Fix 2C).
 
 **If music still crashes after the above:**
@@ -463,7 +463,7 @@ The other Fix 6 changes (`announcement_pipeline.format: WAV`, `pipeline_watchdog
 
 **If STT *still* fails** (other diagnostics in priority order):
 2. **Roll back Fix 2A** (wake word back to mic_raw) — separates the two consumers onto different mic buffers, removes any AEC reference timing skew that two consumers might cause.
-3. **Bump `aec_reference_buffer_ms: 100 → 150`** ([line 198](esphome-config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml#L198)) — if the speaker pipeline got slower after Fix 8 (`task_stack_in_psram` + PSRAM 100 MHz), the 100 ms AEC reference might over-subtract.
+3. **Bump `aec_reference_buffer_ms: 100 → 150`** ([line 198](esphome-config/ha-friday.yaml#L198)) — if the speaker pipeline got slower after Fix 8 (`task_stack_in_psram` + PSRAM 100 MHz), the 100 ms AEC reference might over-subtract.
 4. **Drop `volume_multiplier: 4.0 → 2.0`** — defensive; halves post-AGC gain to leave headroom against any residual AGC overshoot.
 
 Try #1–4 in order. Each should be verified independently (single change at a time).
@@ -488,7 +488,7 @@ Two complementary changes:
 
 ```yaml
 else:
-  - delay: 1500ms      # NEW — let Ivy finish speaking naturally
+  - delay: 1500ms      # NEW — let Friday finish speaking naturally
   - script.execute:
       id: set_anim_state
       target_state: 0
@@ -515,7 +515,7 @@ The guard prevents the media-player IDLE event (which fires when the TTS announc
 Test in this order — each builds on the previous:
 
 1. **Weather** — Reboot, wait ~5 s for HA to push weather. Both temperature *and* icon should show. If icon shows but temp says `-- °C`, the entity_id fix didn't take.
-2. **Logs** — Tail `esphome logs --no-states /config/waveshare-p4-touch-lcd-4c-ai-ivy.yaml`. Idle for 30 s; you should see < 5 lines/min. Trigger one wake-word cycle; you should see only diagnostic lines (Wake word detected, STT heard, TTS text). Without `--no-states` you'll still see `[S][media_player]:` from aioesphomeapi (see Fix 4 callout).
+2. **Logs** — Tail `esphome logs --no-states /config/ha-friday.yaml`. Idle for 30 s; you should see < 5 lines/min. Trigger one wake-word cycle; you should see only diagnostic lines (Wake word detected, STT heard, TTS text). Without `--no-states` you'll still see `[S][media_player]:` from aioesphomeapi (see Fix 4 callout).
 3. **Wake-word reliability while idle** — Say wake word 10× over 5 minutes from normal speaking distance. Should detect ≥ 8/10. If <6/10, drop probability_cutoff to 0.40 then 0.38.
 4. **Wake-word during music** — Start a music stream from HA. Say wake word. Music should *pause* (not stop), VA should listen.
 5. **Pause/resume timeout** — Repeat #4 but stay silent. After ~10 s VA times out → music resumes automatically and Now Playing screen comes back.
