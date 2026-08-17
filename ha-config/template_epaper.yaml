@@ -1,0 +1,22 @@
+# ──────────────────────────────────────────────────────────────────────
+# ePaper Calendar — Trigger-based Template Sensor
+#
+# Stores all calendar events as a single ;; -delimited string in
+# the 'events_data' attribute (no 255-char limit like input_text).
+# ESPHome reads this attribute via a homeassistant text_sensor,
+# which auto-syncs on device connect (works with deep sleep).
+#
+# Updated by the automation via the update_epaper_calendar_data event.
+#
+# Include in configuration.yaml:
+#   template: !include template_epaper.yaml
+# ──────────────────────────────────────────────────────────────────────
+- trigger:
+    - trigger: event
+      event_type: update_epaper_calendar_data
+  sensor:
+    - name: "ePaper Calendar Data"
+      unique_id: epaper_calendar_data
+      state: "{{ trigger.event.data.count | default(0) }}"
+      attributes:
+        events_data: "{{ trigger.event.data.events | default('') }}"

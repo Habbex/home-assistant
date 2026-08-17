@@ -59,7 +59,7 @@ esphome:
                     api.connected:
                   then:
                     - logger.log: "HA API connected. Syncing data..."
-                    - delay: 5s
+                    - delay: 5s  # Wait for homeassistant text_sensors to auto-sync
                     - logger.log: "Updating ePaper display..."
                     - component.update: epaper_display
                     - delay: 2s
@@ -104,8 +104,6 @@ wifi:
   # Captive portal + fallback AP removed — drains battery if WiFi fails.
   # Device will enter deep sleep on WiFi failure instead.
 
-# Globals section removed — prev_battery_voltage no longer needed
-# after charging detection was simplified.
 
 
 # ── Custom component: bigink display driver ──
@@ -197,31 +195,12 @@ text_sensor:
       then:
         - logger.log: "Weather forecast updated from Home Assistant"
 
-  # Calendar events — 8 lines, each: "TITLE|DATE|TIME|ALLDAY"
+  # Calendar events — single ;; -delimited string read from template sensor attribute
+  # (auto-syncs on device connect, no 255-char limit)
   - platform: homeassistant
-    id: cal_line1
-    entity_id: input_text.epaper_calendar_line1
-  - platform: homeassistant
-    id: cal_line2
-    entity_id: input_text.epaper_calendar_line2
-  - platform: homeassistant
-    id: cal_line3
-    entity_id: input_text.epaper_calendar_line3
-  - platform: homeassistant
-    id: cal_line4
-    entity_id: input_text.epaper_calendar_line4
-  - platform: homeassistant
-    id: cal_line5
-    entity_id: input_text.epaper_calendar_line5
-  - platform: homeassistant
-    id: cal_line6
-    entity_id: input_text.epaper_calendar_line6
-  - platform: homeassistant
-    id: cal_line7
-    entity_id: input_text.epaper_calendar_line7
-  - platform: homeassistant
-    id: cal_line8
-    entity_id: input_text.epaper_calendar_line8
+    id: cal_events_data
+    entity_id: sensor.epaper_calendar_data
+    attribute: events_data
 
 # ── Fonts ──
 # Using Google Fonts with full ASCII + Swedish character support (ÅÄÖåäö´’‘).
@@ -671,12 +650,28 @@ display:
         }
       };
 
-      esphome::text_sensor::TextSensor* cal_sensors[] = {
-        id(cal_line1), id(cal_line2), id(cal_line3), id(cal_line4),
-        id(cal_line5), id(cal_line6), id(cal_line7), id(cal_line8)
-      };
-      for (int i = 0; i < 8; i++) {
-        render_event_block(cal_sensors[i]->state);
+      // Split the packed calendar string by ";;" and render each event
+      std::string all_events = id(cal_events_data)->state;
+      // Text sensor may be "unknown" or "unavailable" before sync
+      if (all_events == "unknown" || all_events == "unavailable") all_events = "";
+      ESP_LOGI("calendar", "Rendering calendar data: %d bytes", all_events.size());
+      if (!all_events.empty()) {
+        int event_count = 0;
+        size_t pos = 0;
+        while (pos < all_events.size()) {
+          size_t sep = all_events.find(";;", pos);
+          std::string event_line = (sep == std::string::npos)
+            ? all_events.substr(pos)
+            : all_events.substr(pos, sep - pos);
+          pos = (sep == std::string::npos) ? all_events.size() : sep + 2;
+          if (!event_line.empty()) {
+            event_count++;
+            render_event_block(event_line);
+          }
+        }
+        ESP_LOGI("calendar", "Rendered %d calendar events", event_count);
+      } else {
+        ESP_LOGW("calendar", "No calendar data available!");
       }
 
       // ════════════════════════════════════════════════════════════════════

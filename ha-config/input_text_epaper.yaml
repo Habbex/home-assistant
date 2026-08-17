@@ -1,45 +1,12 @@
 # ──────────────────────────────────────────────────────────────────────
 # ePaper Calendar + Weather — input_text helpers
 #
-# These helpers store pre-formatted calendar event data and weather
-# forecast data. They are populated by the automation in
-# automations_epaper.yaml and read by ESPHome text_sensor entities.
+# Weather forecast data is stored here and read by ESPHome via
+# text_sensor. Calendar events are sent directly to the ESPHome
+# device via its native API service (no input_text needed).
 #
-# 8 calendar lines (one event per line, format: TITLE|DATE|TIME|ALLDAY)
 # 1 weather forecast line (format: DAY|COND|HI|LO;DAY|COND|HI|LO;...)
 # ──────────────────────────────────────────────────────────────────────
-epaper_calendar_line1:
-  name: "ePaper Calendar Line 1"
-  max: 255
-  initial: ""
-epaper_calendar_line2:
-  name: "ePaper Calendar Line 2"
-  max: 255
-  initial: ""
-epaper_calendar_line3:
-  name: "ePaper Calendar Line 3"
-  max: 255
-  initial: ""
-epaper_calendar_line4:
-  name: "ePaper Calendar Line 4"
-  max: 255
-  initial: ""
-epaper_calendar_line5:
-  name: "ePaper Calendar Line 5"
-  max: 255
-  initial: ""
-epaper_calendar_line6:
-  name: "ePaper Calendar Line 6"
-  max: 255
-  initial: ""
-epaper_calendar_line7:
-  name: "ePaper Calendar Line 7"
-  max: 255
-  initial: ""
-epaper_calendar_line8:
-  name: "ePaper Calendar Line 8"
-  max: 255
-  initial: ""
 epaper_weather_forecast_data:
   name: "ePaper Weather Forecast Data"
   max: 255
