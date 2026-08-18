@@ -62,6 +62,10 @@ esphome:
 esp32:
   board: esp32-p4
   flash_size: 32MB
+  # Default 400 MHz is experimental on P4 and may fail to boot.
+  # 360 MHz is the recommended stable frequency.
+  # See: https://github.com/esphome/esphome/issues/13425
+  cpu_frequency: 360MHz
   framework:
     type: esp-idf
     advanced:
@@ -93,6 +97,15 @@ esp32:
           # for MbedTLS; without this they land in internal SRAM and exhaust
           # it after 2-3 sessions (the "fills up" symptom).
           CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: y
+          # TCP buffer tuning — default lwIP TCP window/send buffer is
+          # 5744 bytes. TTS audio downloads (50-200 KB) need many SDIO
+          # round-trips at that size. 16 KB windows reduce round-trips
+          # by ~3x, meaning fewer SDIO ACK transactions and less bus
+          # contention during concurrent audio playback + TTS download.
+          # Revert if Heap Free drops by >20 KB (buffers may land in
+          # internal SRAM rather than PSRAM).
+          CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "16384"
+          CONFIG_LWIP_TCP_WND_DEFAULT: "16384"
 
 psram:
   speed: 200MHz
@@ -149,11 +162,44 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
+# ---- C6 Co-processor Firmware Update ----
+# The ESP32-C6 runs its own firmware as the SDIO Wi-Fi slave.
+# Many boards shipped with older firmware (v2.3.0–v2.9.x) that lacks
+# SDIO transport recovery — if the SDIO link hangs, only a full
+# reboot recovers it. Firmware v2.12.3+ adds automatic link recovery.
+# This component checks the ESPHome-hosted manifest and surfaces
+# available updates as a Home Assistant entity (Settings → Devices).
+# WARNING: avoid v2.12.8 — community reports bootloops on P4+C6.
+# Check the current version via the update entity before triggering.
+# Required by the esp32_hosted update component (type: http)
+# to fetch the C6 firmware manifest from GitHub.
+http_request:
+
+update:
+  - platform: esp32_hosted
+    name: "C6 Co-processor Firmware"
+    type: http
+    source: https://esphome.github.io/esp-hosted-firmware/manifest/esp32c6.json
+    update_interval: 6h
+
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: none
   fast_connect: true
+  # TX power reduced from default 20.5 dB — at close range (<5 m),
+  # max power causes self-interference from reflected signals and
+  # voltage-rail sag on the C6's 3.3V regulator during TX bursts.
+  # Start at 15 dB; raise to 20.5 if WiFi Signal drops below -70 dBm.
+  output_power: 15dB
+  # Static IP eliminates DHCP negotiation on every reconnect (~200-500ms
+  # saved). Each DHCP packet is an SDIO transaction — fewer packets
+  # during the fragile post-reconnect window = more reliable recovery.
+  manual_ip:
+    static_ip: 192.168.50.202
+    gateway: 192.168.50.1
+    subnet: 255.255.255.0
+    dns1: 192.168.50.1
   ap:
     ssid: "Esp32-P4-Touch-Lcd-4C"
     password: !secret ap_pwd
@@ -373,6 +419,16 @@ sensor:
       name: "PSRAM Free"
       id: psram_free
       entity_category: diagnostic
+
+  # ---- WiFi signal strength (C6 co-processor link quality) ----
+  # Correlate connectivity issues / TTS failures with signal quality.
+  # Below -70 dBm = weak; below -80 dBm = unreliable for audio streaming.
+  # If persistently low, consider an external antenna or relocating.
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_rssi
+    update_interval: 60s
+    entity_category: diagnostic
 
 # ---- Track metadata and weather condition from Home Assistant ----
 # Entity ID confirmed from HA device page: media_player.waveshare_p4_touch_lcd_4_ai
