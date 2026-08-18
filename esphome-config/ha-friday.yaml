@@ -1069,7 +1069,7 @@ lvgl:
 
           # Processing overlay — visible in state 2 only.
           # bg_opa: TRANSP lets the Friday processing animimg (state_anim) show
-          # through; only the spinner arc and label are drawn on top.
+          # through; the spinner arc, status label and transcript are drawn on top.
           - obj:
               id: processing_screen
               width: 100%
@@ -1078,23 +1078,35 @@ lvgl:
               border_width: 0
               hidden: true
               widgets:
+                # Spinning arc — universally understood "thinking" indicator.
+                # Sits below the Friday animation, above the text labels.
+                - spinner:
+                    id: processing_spinner
+                    width: 300
+                    height: 300
+                    align: CENTER
+                    y: 0
+                    spin_time: 2s
+                    arc_length: 120deg
+                    arc_color: 0x4FC3F7
+                    arc_opa: 60%
                 # Primary status line — cycles through "Processing..." / "Building response..."
                 - label:
                     id: processing_label
                     text: "Processing..."
                     align: BOTTOM_MID
-                    y: -40
-                    text_color: 0xCCCCCC
-                    text_font: roboto_32
+                    y: -50
+                    text_color: 0xFFFFFF
+                    text_font: roboto_36
                 # Secondary line — shows what Friday heard (STT transcript)
                 - label:
                     id: processing_heard_label
                     text: ""
                     width: 90%
                     align: BOTTOM_MID
-                    y: -5
+                    y: -10
                     text_align: CENTER
-                    text_color: 0x888888
+                    text_color: 0xAAAAAA
                     text_font: roboto_32
                     long_mode: DOT
 
