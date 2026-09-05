@@ -20,7 +20,7 @@ config/
 .device-builder*
 .pio/
 .pioenvs/
-
+esphome-config/.cache
 # Caches
 __pycache__/
 *.pyc
