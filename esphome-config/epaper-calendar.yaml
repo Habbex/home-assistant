@@ -49,17 +49,23 @@ esphome:
             condition:
               wifi.connected:
             then:
-              - logger.log: "WiFi connected, waiting for HA API..."
+              - logger.log: "WiFi connected, waiting for HA API state subscription..."
               - wait_until:
                   condition:
                     api.connected:
-                  timeout: 15s
+                      state_subscription_only: true
+                  timeout: 30s
               - if:
                   condition:
                     api.connected:
+                      state_subscription_only: true
                   then:
-                    - logger.log: "HA API connected. Syncing data..."
-                    - delay: 5s  # Wait for homeassistant text_sensors to auto-sync
+                    - logger.log: "HA API connected. Waiting for calendar & weather data..."
+                    - wait_until:
+                        condition:
+                          lambda: 'return id(cal_events_data).has_state() && id(ha_weather_forecast).has_state();'
+                        timeout: 10s
+                    - delay: 1s  # Allow remaining sensors/time to finish syncing
                     - logger.log: "Updating ePaper display..."
                     - component.update: epaper_display
                     - delay: 2s
@@ -201,6 +207,11 @@ text_sensor:
     id: cal_events_data
     entity_id: sensor.epaper_calendar_data
     attribute: events_data
+    on_value:
+      then:
+        - logger.log:
+            format: "Calendar events updated from Home Assistant (%d bytes)"
+            args: [ 'x.size()' ]
 
 # ── Fonts ──
 # Using Google Fonts with full ASCII + Swedish character support (ÅÄÖåäö´’‘).

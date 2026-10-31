@@ -38,3 +38,13 @@
       unique_id: epaper_weather_forecast
       state: >
         {{ states('input_text.epaper_weather_forecast_data') }}
+- trigger:
+    - trigger: event
+      event_type: update_epaper_calendar_data
+  sensor:
+    - name: "ePaper Calendar Data"
+      unique_id: epaper_calendar_data
+      state: "{{ trigger.event.data.count | default(0) }}"
+      attributes:
+        events_data: "{{ trigger.event.data.events | default('') }}"
+        updated_at: "{{ now().isoformat() }}"

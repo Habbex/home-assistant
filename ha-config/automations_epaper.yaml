@@ -21,6 +21,8 @@
       hours: "/6"
     - trigger: homeassistant
       event: start
+    - trigger: event
+      event_type: event_template_reloaded
   actions:
     - delay: "00:00:05" # Wait for integrations to be ready
     - action: calendar.get_events
